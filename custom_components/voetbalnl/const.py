@@ -1,7 +1,7 @@
 """Constants for the Voetbal.nl integration."""
 
 DOMAIN = "voetbalnl"
-VERSION = "1.1.1-mh.1"
+VERSION = "1.1.1-mh.2"
 
 # Configuration keys
 CONF_USERNAME = "username"

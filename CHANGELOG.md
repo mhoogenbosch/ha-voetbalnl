@@ -5,6 +5,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ---
 
+## [1.1.1-mh.2] - 2026-08-17
+
+### Changed
+- Versienummer in `const.py` (device `sw_version`) gelijkgetrokken met `manifest.json`. Geen functionele wijzigingen ten opzichte van `1.1.1-mh.1`.
+
+---
+
 ## [1.1.1-mh.1] - 2026-08-17
 
 First release of the [mhoogenbosch](https://github.com/mhoogenbosch/ha-voetbalnl) fork.
