@@ -1,6 +1,7 @@
 """Voetbal.nl API client - handles authentication and data scraping."""
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -569,18 +570,34 @@ class VoetbalNLApi:
                                 team_name,
                                 effective_name,
                             )
-                    elif label == "schedule":
-                        next_match = self._parse_next_match(html, effective_name)
-                        soup = BeautifulSoup(html, "html.parser")
-                        all_matches.extend(
-                            m for m in self._parse_match_list(soup, played=False)
-                            if self._match_involves_team(m, effective_name)
+                    elif label in ("schedule", "results"):
+                        played = label == "results"
+                        rows = self._parse_match_list(
+                            BeautifulSoup(html, "html.parser"), played=played
                         )
-                    elif label == "results":
-                        last_result = self._parse_last_result(html, effective_name)
-                        soup = BeautifulSoup(html, "html.parser")
+                        # The page itself only renders the next round; the rest
+                        # sits behind "Toon volledig programma", which loads the
+                        # remaining rounds from an ajax endpoint named in the
+                        # page. Merge those in so the calendar holds the whole
+                        # published schedule instead of a single fixture.
+                        extra_html = await self._fetch_schedule_ajax(
+                            session, html, label
+                        )
+                        if extra_html:
+                            rows.extend(
+                                self._parse_match_list(
+                                    BeautifulSoup(extra_html, "html.parser"),
+                                    played=played,
+                                )
+                            )
+                        rows = self._dedupe_matches(rows)
+                        picked = self._pick_match(rows, effective_name)
+                        if played:
+                            last_result = picked
+                        else:
+                            next_match = picked
                         all_matches.extend(
-                            m for m in self._parse_match_list(soup, played=True)
+                            m for m in rows
                             if self._match_involves_team(m, effective_name)
                         )
 
@@ -747,6 +764,90 @@ class VoetbalNLApi:
 
         return entry
 
+    async def _fetch_schedule_ajax(
+        self, session: aiohttp.ClientSession, page_html: str, label: str
+    ) -> str:
+        """Return the extra schedule HTML behind "Toon volledig programma".
+
+        A schedule or results page renders only the next round; the remaining
+        rounds are loaded by the page's ``ScheduleResults`` component from an
+        ajax endpoint whose URL sits in its ``data-options`` attribute, e.g.
+        ``{"url": "/team/ajax/T2070245537/programma/competitie-najaar"}``. The
+        endpoint answers with ``{"html": "<div class=\\"table-wrapper\\">…"}``.
+
+        Returns an empty string when there is nothing extra to fetch — the URL
+        is legitimately empty before a competition has any published rounds.
+        """
+        soup = BeautifulSoup(page_html, "html.parser")
+        el = soup.select_one('[data-component="ScheduleResults"][data-options]')
+        if not el:
+            return ""
+
+        try:
+            options = json.loads(el.get("data-options") or "{}")
+        except ValueError:
+            _LOGGER.debug("Could not parse ScheduleResults data-options (%s)", label)
+            return ""
+
+        url = (options.get("url") or "").strip() if isinstance(options, dict) else ""
+        if not url:
+            return ""
+        if not url.startswith("http"):
+            url = f"{BASE_URL}{url}"
+
+        try:
+            async with session.get(
+                url, headers={"X-Requested-With": "XMLHttpRequest"}
+            ) as resp:
+                if resp.status != 200:
+                    _LOGGER.warning(
+                        "Failed to fetch full %s (ajax): HTTP %s", label, resp.status
+                    )
+                    return ""
+                payload = await resp.json(content_type=None)
+        except (aiohttp.ClientError, ValueError) as err:
+            _LOGGER.warning("Error fetching full %s (ajax): %s", label, err)
+            return ""
+
+        if not isinstance(payload, dict):
+            return ""
+        return payload.get("html") or ""
+
+    @staticmethod
+    def _dedupe_matches(matches: list[MatchData]) -> list[MatchData]:
+        """Drop duplicates while preserving order (page rows + ajax rows overlap)."""
+        seen: set[tuple] = set()
+        unique: list[MatchData] = []
+        for m in matches:
+            key = (
+                (m.match_url,)
+                if m.match_url
+                else (m.date, m.time, m.home_team, m.away_team)
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(m)
+        return unique
+
+    @staticmethod
+    def _pick_match(matches: list[MatchData], team_name: str) -> MatchData | None:
+        """Return the first match involving our own team, or None."""
+        # Preferred: the "my-team" marker voetbal.nl puts on our own rows
+        for m in matches:
+            if m.is_my_team:
+                return m
+
+        normalized = (team_name or "").lower().strip()
+        if normalized:
+            for m in matches:
+                if (
+                    normalized in m.home_team.lower()
+                    or normalized in m.away_team.lower()
+                ):
+                    return m
+        return None
+
     def _parse_next_match(self, html: str, team_name: str) -> MatchData | None:
         """
         Parse the next upcoming match for the tracked team from a programma page.
@@ -762,15 +863,9 @@ class VoetbalNLApi:
             _LOGGER.debug("No upcoming matches found for %s", team_name)
             return None
 
-        # Preferred: the "my-team" marker voetbal.nl puts on our own rows
-        for m in matches:
-            if m.is_my_team:
-                return m
-
-        normalized = team_name.lower().strip()
-        for m in matches:
-            if normalized in m.home_team.lower() or normalized in m.away_team.lower():
-                return m
+        picked = self._pick_match(matches, team_name)
+        if picked:
+            return picked
 
         _LOGGER.debug(
             "No upcoming match found for '%s' — team names in schedule: %s",
@@ -794,15 +889,9 @@ class VoetbalNLApi:
             _LOGGER.debug("No results found for %s", team_name)
             return None
 
-        # Preferred: the "my-team" marker voetbal.nl puts on our own rows
-        for m in matches:
-            if m.is_my_team:
-                return m
-
-        normalized = team_name.lower().strip()
-        for m in matches:
-            if normalized in m.home_team.lower() or normalized in m.away_team.lower():
-                return m
+        picked = self._pick_match(matches, team_name)
+        if picked:
+            return picked
 
         _LOGGER.debug(
             "No result found for '%s' — team names in results: %s",

@@ -5,6 +5,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ---
 
+## [1.1.2-mh.1] - 2026-08-17
+
+### Added
+- **The calendar now holds the whole published schedule instead of only the next round.** A schedule or results page renders one round; the remaining rounds sit behind the *"Toon volledig programma"* button, which loads them from an ajax endpoint named in the page's `ScheduleResults` component (`data-options` → `{"url": "/team/ajax/T…/programma/competitie-najaar"}`). That endpoint is now followed and its fixtures merged in, de-duplicated on match URL. The URL is read from the page, never hard-coded, and an empty URL (no rounds published yet) is handled as "nothing extra".
+
+---
+
 ## [1.1.1-mh.2] - 2026-08-17
 
 ### Changed
