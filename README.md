@@ -127,7 +127,13 @@ After setup, click **Configure** on the integration card to adjust:
 
 ### Wrong match shown / sensor shows "No upcoming matches"
 
-The team name configured must match how the team appears in the voetbal.nl schedule. If the names differ (e.g. configured as `ZVR The Match VR3` but listed as `VR3`), no match will be found and the sensor returns `No upcoming matches` instead of showing an incorrect fixture. Enable debug logging and look for lines starting with `No upcoming match found for` — they list the exact team names voetbal.nl uses, so you can correct the configured name.
+Since `1.1.1-mh.1` the configured team name no longer has to match the name on voetbal.nl: the own team is recognised by the `my-team` marker voetbal.nl adds for the logged-in user, and in the standings by the team ID from the configured team URL. Name matching is only used as a fallback.
+
+If the sensors still stay empty:
+
+- Make sure the **Team URL** points at the right team (`https://www.voetbal.nl/team/T…/overzicht`); the team ID in it is what identifies your team in the standings.
+- Check that the poule actually has fixtures published — before the season starts the schedule page can legitimately be empty.
+- Enable debug logging and look for `Resolved configured team '…' to voetbal.nl team '…'` (the name that was resolved) and `No upcoming match found for` (the team names present in the schedule).
 
 ### No data / empty sensors
 
