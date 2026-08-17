@@ -65,6 +65,27 @@ def _event_uid(match: MatchData) -> str | None:
     return f"voetbalnl-{slug}" if slug else None
 
 
+def _match_summary(match: MatchData) -> str:
+    """Return the event title for a match.
+
+    When voetbal.nl told us which side we are on (the "my-team" marker), the
+    title names the side and the opponent — ``Uit: SJO JOY 26 O17-2`` — which
+    reads better in a personal calendar than both team names. Without that
+    marker we cannot tell the sides apart, so both teams are listed.
+    """
+    if match.my_team_is_home is None:
+        summary = f"{match.home_team} vs {match.away_team}"
+    else:
+        opponent = match.away_team if match.my_team_is_home else match.home_team
+        side = "Thuis" if match.my_team_is_home else "Uit"
+        summary = f"{side}: {opponent}"
+
+    if match.is_played and match.home_score is not None and match.away_score is not None:
+        summary += f" ({match.home_score}-{match.away_score})"
+
+    return summary
+
+
 def _match_to_event(match: MatchData) -> CalendarEvent | None:
     """Convert a :class:`MatchData` to a HA :class:`CalendarEvent`.
 
@@ -77,10 +98,14 @@ def _match_to_event(match: MatchData) -> CalendarEvent | None:
     if parsed is None:
         return None
 
-    summary = f"{match.home_team} vs {match.away_team}"
+    summary = _match_summary(match)
 
-    # Build a description from available metadata
+    # Build a description from available metadata. The full fixture goes in
+    # first: the title only names the opponent, so this keeps both team names
+    # available on the event itself.
     desc_parts: list[str] = []
+    if match.home_team and match.away_team and match.my_team_is_home is not None:
+        desc_parts.append(f"{match.home_team} – {match.away_team}")
     if match.competition:
         desc_parts.append(match.competition)
     if match.is_played and match.home_score is not None and match.away_score is not None:

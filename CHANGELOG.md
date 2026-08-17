@@ -5,6 +5,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ---
 
+## [1.2.0-mh.1] - 2026-08-17
+
+### Changed
+- **Calendar event titles now name the side and the opponent** — `Uit: SJO JOY 26 O17-2`, `Thuis: VIOD O17-1`, with the score appended once played (`Uit: FC Bergh O17-1 (1-3)`). In a personal calendar that reads better than both team names, one of which is always your own. Titles are Dutch, matching the site. When the `my-team` marker is absent the sides cannot be told apart and the old `Home vs Away` title is used.
+- The full fixture (`FC Bergh O17-1 – VVG '25 O17-1`) moved to the event description, so both team names stay available on the event.
+
+---
+
 ## [1.1.3-mh.1] - 2026-08-17
 
 ### Fixed
