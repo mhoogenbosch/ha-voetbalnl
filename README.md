@@ -1,8 +1,14 @@
 # ha-voetbalnl — Voetbal.nl Home Assistant Integration
 
-![Version](https://img.shields.io/badge/version-1.1.0-blue) ![HA](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-brightgreen)
+![Version](https://img.shields.io/badge/version-1.1.1--mh.1-blue) ![HA](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-brightgreen)
 
-Track your **zaalvoetbal (futsal)** team on [voetbal.nl](https://www.voetbal.nl) directly from Home Assistant. The integration authenticates with your voetbal.nl account and exposes three sensors and a calendar per configured team.
+> **Fork.** This is a fork of [rcAlexterNeuzen/ha-voetbalnl](https://github.com/rcAlexterNeuzen/ha-voetbalnl).
+> It identifies your own team by the `my-team` marker voetbal.nl adds for the logged-in user
+> (and by the team ID in the team URL) instead of by matching the team name you typed, so
+> fixtures, results and the league position are found even when the configured name differs
+> from the name voetbal.nl uses — e.g. `VVG 17-01` vs `VVG '25 O17-1`. See [CHANGELOG.md](CHANGELOG.md).
+
+Track your team on [voetbal.nl](https://www.voetbal.nl) directly from Home Assistant — veldvoetbal and zaalvoetbal (futsal) alike. The integration authenticates with your voetbal.nl account and exposes three sensors and a calendar per configured team.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 

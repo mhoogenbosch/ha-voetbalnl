@@ -75,6 +75,14 @@ class MatchData:
     location: str = ""
     match_url: str = ""
     is_played: bool = False
+    # True/False when voetbal.nl marked this row with the "my-team" class
+    # (only available for authenticated sessions); None when unknown.
+    my_team_is_home: bool | None = None
+
+    @property
+    def is_my_team(self) -> bool:
+        """Return True if voetbal.nl marked this match as involving my team."""
+        return self.my_team_is_home is not None
 
     @property
     def score_display(self) -> str:
@@ -87,6 +95,19 @@ class MatchData:
         """Return result string for a specific team."""
         if self.home_score is None or self.away_score is None:
             return "unknown"
+        # Prefer the authoritative "my-team" marker from voetbal.nl
+        if self.my_team_is_home is not None:
+            if self.my_team_is_home:
+                if self.home_score > self.away_score:
+                    return "win"
+                if self.home_score < self.away_score:
+                    return "loss"
+                return "draw"
+            if self.away_score > self.home_score:
+                return "win"
+            if self.away_score < self.home_score:
+                return "loss"
+            return "draw"
         normalized = team_name.lower().strip()
         home_normalized = self.home_team.lower().strip()
         if normalized in home_normalized or home_normalized in normalized:
@@ -474,11 +495,15 @@ class VoetbalNLApi:
         standing, next_match, last_result, all_matches = await self._fetch_team_all(
             team_url, team_name
         )
+        # The standings page tells us the exact name voetbal.nl uses for our
+        # team (e.g. "VVG '25 O17-1" for a config entry named "VVG 17-01").
+        resolved_name = (standing.team_name if standing else "") or team_name
         return {
             "standing": standing,
             "next_match": next_match,
             "last_result": last_result,
             "all_matches": all_matches,
+            "team_name": resolved_name,
         }
 
     async def _fetch_team_all(
@@ -498,6 +523,16 @@ class VoetbalNLApi:
         standing_url = f"{base}/stand"
         schedule_url = f"{base}/programma"
         results_url = f"{base}/uitslagen"
+
+        # Team ID from the URL (e.g. "T2070245537"); used to recognise our own
+        # row in the standings regardless of how the team is named.
+        team_id_match = re.search(r"/team/(T\d+)", team_url)
+        team_id = team_id_match.group(1) if team_id_match else ""
+
+        # Name used for matching; replaced by the canonical voetbal.nl name as
+        # soon as the standings page has been parsed (the standings are fetched
+        # first below).
+        effective_name = team_name
 
         standing_data: StandingData | None = None
         next_match: MatchData | None = None
@@ -523,20 +558,30 @@ class VoetbalNLApi:
                         html = await response.text()
 
                     if label == "standing":
-                        standing_data = self._parse_standings(html, team_name)
+                        standing_data = self._parse_standings(
+                            html, team_name, team_id
+                        )
+                        if standing_data and standing_data.team_name:
+                            effective_name = standing_data.team_name
+                            _LOGGER.debug(
+                                "Resolved configured team '%s' to voetbal.nl "
+                                "team '%s'",
+                                team_name,
+                                effective_name,
+                            )
                     elif label == "schedule":
-                        next_match = self._parse_next_match(html, team_name)
+                        next_match = self._parse_next_match(html, effective_name)
                         soup = BeautifulSoup(html, "html.parser")
                         all_matches.extend(
                             m for m in self._parse_match_list(soup, played=False)
-                            if self._match_involves_team(m, team_name)
+                            if self._match_involves_team(m, effective_name)
                         )
                     elif label == "results":
-                        last_result = self._parse_last_result(html, team_name)
+                        last_result = self._parse_last_result(html, effective_name)
                         soup = BeautifulSoup(html, "html.parser")
                         all_matches.extend(
                             m for m in self._parse_match_list(soup, played=True)
-                            if self._match_involves_team(m, team_name)
+                            if self._match_involves_team(m, effective_name)
                         )
 
                 except aiohttp.ClientError as err:
@@ -555,7 +600,9 @@ class VoetbalNLApi:
 
         return standing_data, next_match, last_result, all_matches
 
-    def _parse_standings(self, html: str, team_name: str) -> StandingData | None:
+    def _parse_standings(
+        self, html: str, team_name: str, team_id: str = ""
+    ) -> StandingData | None:
         """
         Parse standings from a team's /stand page on voetbal.nl.
 
@@ -581,6 +628,8 @@ class VoetbalNLApi:
 
         # Try to find the league / poule name
         for selector in [
+            # voetbal.nl page header: <h1>team</h1><h3>competition</h3>
+            ".PageCover-titleWrap h3",
             "h1.competition-title",
             ".competition-name h2",
             ".poule-title",
@@ -605,6 +654,12 @@ class VoetbalNLApi:
         # Each team is an <a class="row"> linking to /team/...
         for row in soup.select('a.row[href*="/team/"]'):
             try:
+                # voetbal.nl marks the logged-in user's own team with the
+                # "my-team" class; the row href also carries the team ID.
+                row_href = row.get("href", "")
+                is_own_team = "my-team" in (row.get("class") or []) or bool(
+                    team_id and team_id in row_href
+                )
                 vals = [el.get_text(strip=True) for el in row.select(".value")]
                 # Need at least: position, logo, team, and some stats
                 if len(vals) < 4 or not vals[0].isdigit():
@@ -626,7 +681,10 @@ class VoetbalNLApi:
                 entry.goal_difference = entry.goals_for - entry.goals_against
                 entries.append(entry)
 
-                if team_name.lower().strip() in entry.team_name.lower():
+                if is_own_team or (
+                    not data.team_entry
+                    and team_name.lower().strip() in entry.team_name.lower()
+                ):
                     data.team_entry = entry
                     data.team_position = entry.position
                     data.team_name = entry.team_name
@@ -704,6 +762,11 @@ class VoetbalNLApi:
             _LOGGER.debug("No upcoming matches found for %s", team_name)
             return None
 
+        # Preferred: the "my-team" marker voetbal.nl puts on our own rows
+        for m in matches:
+            if m.is_my_team:
+                return m
+
         normalized = team_name.lower().strip()
         for m in matches:
             if normalized in m.home_team.lower() or normalized in m.away_team.lower():
@@ -731,6 +794,11 @@ class VoetbalNLApi:
             _LOGGER.debug("No results found for %s", team_name)
             return None
 
+        # Preferred: the "my-team" marker voetbal.nl puts on our own rows
+        for m in matches:
+            if m.is_my_team:
+                return m
+
         normalized = team_name.lower().strip()
         for m in matches:
             if normalized in m.home_team.lower() or normalized in m.away_team.lower():
@@ -745,8 +813,17 @@ class VoetbalNLApi:
 
     @staticmethod
     def _match_involves_team(match: "MatchData", team_name: str) -> bool:
-        """Return True if *team_name* is home or away in this match."""
-        needle = team_name.lower()
+        """Return True if this match involves our own team.
+
+        Prefers the "my-team" class voetbal.nl adds for the logged-in user;
+        falls back to a substring match on *team_name* when that marker is
+        absent (e.g. anonymous sessions or layout changes).
+        """
+        if match.is_my_team:
+            return True
+        needle = (team_name or "").lower().strip()
+        if not needle:
+            return False
         return (
             needle in (match.home_team or "").lower()
             or needle in (match.away_team or "").lower()
@@ -837,13 +914,21 @@ class VoetbalNLApi:
         if href:
             m.match_url = href if href.startswith("http") else f"{BASE_URL}{href}"
 
-        home_el = row.select_one(".value.home .team")
-        if home_el:
-            m.home_team = home_el.get_text(strip=True)
+        home_cell = row.select_one(".value.home")
+        if home_cell:
+            home_el = home_cell.select_one(".team")
+            if home_el:
+                m.home_team = home_el.get_text(strip=True)
+            if "my-team" in (home_cell.get("class") or []):
+                m.my_team_is_home = True
 
-        away_el = row.select_one(".value.away .team")
-        if away_el:
-            m.away_team = away_el.get_text(strip=True)
+        away_cell = row.select_one(".value.away")
+        if away_cell:
+            away_el = away_cell.select_one(".team")
+            if away_el:
+                m.away_team = away_el.get_text(strip=True)
+            if "my-team" in (away_cell.get("class") or []):
+                m.my_team_is_home = False
 
         center_el = row.select_one(".value.center")
         if center_el:

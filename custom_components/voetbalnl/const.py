@@ -1,7 +1,7 @@
 """Constants for the Voetbal.nl integration."""
 
 DOMAIN = "voetbalnl"
-VERSION = "1.1.0"
+VERSION = "1.1.0-mh.1"
 
 # Configuration keys
 CONF_USERNAME = "username"
@@ -18,7 +18,7 @@ DEFAULT_TIMEOUT = 30  # seconds
 BASE_URL = "https://www.voetbal.nl"
 LOGIN_URL = f"{BASE_URL}/inloggen"
 SEARCH_URL = f"{BASE_URL}/zoeken"
-PROFILE_URL = f"{BASE_URL}/mijnprofiel"
+PROFILE_URL = f"{BASE_URL}/profiel/overzicht"
 
 # KNVB Account OAuth URLs (used for accounts created via SSO)
 # The modal endpoint on knvb.nl returns an iframe URL with a fresh nonce+state

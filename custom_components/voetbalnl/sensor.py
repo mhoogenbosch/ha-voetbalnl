@@ -136,6 +136,27 @@ class VoetbalNLSensor(CoordinatorEntity[VoetbalNLCoordinator], SensorEntity):
         return {}
 
     # ------------------------------------------------------------------ #
+    # Team-name / side helpers                                             #
+    # ------------------------------------------------------------------ #
+
+    def _resolved_team_name(self, data: dict[str, Any]) -> str:
+        """Return the team name as voetbal.nl spells it, if we resolved it.
+
+        The configured name (e.g. "VVG 17-01") often differs from the name on
+        voetbal.nl (e.g. "VVG '25 O17-1"); the coordinator resolves it from
+        the standings page.
+        """
+        return data.get("team_name") or self._team_name
+
+    @staticmethod
+    def _is_home_game(match: Any, team_name: str) -> bool:
+        """Return True if our team plays at home in *match*."""
+        flag = getattr(match, "my_team_is_home", None)
+        if flag is not None:
+            return bool(flag)
+        return team_name.lower() in (getattr(match, "home_team", "") or "").lower()
+
+    # ------------------------------------------------------------------ #
     # Standing sensor helpers                                              #
     # ------------------------------------------------------------------ #
 
@@ -157,7 +178,7 @@ class VoetbalNLSensor(CoordinatorEntity[VoetbalNLCoordinator], SensorEntity):
             return {}
 
         attrs: dict[str, Any] = {
-            "team": self._team_name,
+            "team": self._resolved_team_name(data),
             "league": getattr(standing, "league_name", ""),
         }
 
@@ -222,7 +243,7 @@ class VoetbalNLSensor(CoordinatorEntity[VoetbalNLCoordinator], SensorEntity):
 
         home_team = getattr(match, "home_team", "")
         away_team = getattr(match, "away_team", "")
-        team_lower = self._team_name.lower()
+        is_home = self._is_home_game(match, self._resolved_team_name(data))
 
         return {
             "home_team": home_team,
@@ -232,12 +253,8 @@ class VoetbalNLSensor(CoordinatorEntity[VoetbalNLCoordinator], SensorEntity):
             "competition": getattr(match, "competition", ""),
             "location": getattr(match, "location", ""),
             "match_url": getattr(match, "match_url", ""),
-            "is_home_game": team_lower in home_team.lower(),
-            "opponent": (
-                away_team
-                if team_lower in home_team.lower()
-                else home_team
-            ),
+            "is_home_game": is_home,
+            "opponent": away_team if is_home else home_team,
         }
 
     # ------------------------------------------------------------------ #
@@ -256,7 +273,7 @@ class VoetbalNLSensor(CoordinatorEntity[VoetbalNLCoordinator], SensorEntity):
         away = getattr(match, "away_team", "")
 
         if home_score is not None and away_score is not None:
-            result = match.result_for_team(self._team_name)
+            result = match.result_for_team(self._resolved_team_name(data))
             score = f"{home_score}-{away_score}"
             return f"{home} {score} {away} ({result.upper()})"
 
@@ -272,8 +289,8 @@ class VoetbalNLSensor(CoordinatorEntity[VoetbalNLCoordinator], SensorEntity):
         away_team = getattr(match, "away_team", "")
         home_score = getattr(match, "home_score", None)
         away_score = getattr(match, "away_score", None)
-        team_lower = self._team_name.lower()
-        is_home = team_lower in home_team.lower()
+        resolved_name = self._resolved_team_name(data)
+        is_home = self._is_home_game(match, resolved_name)
 
         attrs: dict[str, Any] = {
             "home_team": home_team,
@@ -288,7 +305,7 @@ class VoetbalNLSensor(CoordinatorEntity[VoetbalNLCoordinator], SensorEntity):
         }
 
         if home_score is not None and away_score is not None:
-            attrs["result"] = match.result_for_team(self._team_name)
+            attrs["result"] = match.result_for_team(resolved_name)
             if is_home:
                 attrs["goals_scored"] = home_score
                 attrs["goals_conceded"] = away_score

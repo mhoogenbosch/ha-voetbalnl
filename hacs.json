@@ -1,6 +1,6 @@
 {
   "name": "Voetbal.nl",
-  "description": "Track futsal (zaalvoetbal) teams on voetbal.nl — standings, schedule, and results.",
+  "description": "Track voetbal.nl teams (veld & zaal) — standings, schedule, and results.",
   "render_readme": true,
   "homeassistant": "2024.1.0"
 }
