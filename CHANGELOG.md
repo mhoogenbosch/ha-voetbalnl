@@ -5,6 +5,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ---
 
+## [1.1.3-mh.1] - 2026-08-17
+
+### Fixed
+- **Calendar events had no UID.** Anything that mirrors this calendar elsewhere (sync scripts, other integrations) keys on the event UID, and without one every fixture collapsed onto the same key. Each event now carries a stable UID derived from the match ID in its voetbal.nl URL (`voetbalnl-M79726132`), falling back to a slug of date and teams.
+
+---
+
 ## [1.1.2-mh.1] - 2026-08-17
 
 ### Added

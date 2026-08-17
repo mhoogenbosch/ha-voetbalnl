@@ -9,6 +9,7 @@ match that has not yet ended.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -44,6 +45,26 @@ async def async_setup_entry(
     )
 
 
+def _event_uid(match: MatchData) -> str | None:
+    """Return a stable UID for a match.
+
+    Consumers that mirror this calendar elsewhere (sync scripts, other
+    integrations) key on the event UID, so every match needs its own stable
+    one. Preferred source is the match ID in the voetbal.nl URL
+    (``/wedstrijd/M79726132/programma``); otherwise a slug of date and teams.
+    """
+    found = re.search(r"/wedstrijd/(M\d+)", match.match_url or "")
+    if found:
+        return f"voetbalnl-{found.group(1)}"
+
+    slug = re.sub(
+        r"[^a-z0-9]+",
+        "-",
+        f"{match.date}-{match.home_team}-{match.away_team}".lower(),
+    ).strip("-")
+    return f"voetbalnl-{slug}" if slug else None
+
+
 def _match_to_event(match: MatchData) -> CalendarEvent | None:
     """Convert a :class:`MatchData` to a HA :class:`CalendarEvent`.
 
@@ -68,6 +89,8 @@ def _match_to_event(match: MatchData) -> CalendarEvent | None:
     description = "\n".join(desc_parts) if desc_parts else None
     location = match.location if match.location else None
 
+    uid = _event_uid(match)
+
     if isinstance(parsed, datetime):
         # Timed event — make timezone-aware using the HA local timezone
         start_dt: datetime = dt_util.as_local(parsed)
@@ -78,6 +101,7 @@ def _match_to_event(match: MatchData) -> CalendarEvent | None:
             end=end_dt,
             description=description,
             location=location,
+            uid=uid,
         )
 
     # All-day event — end must be the day *after* the event (iCal spec)
@@ -89,6 +113,7 @@ def _match_to_event(match: MatchData) -> CalendarEvent | None:
         end=end_date,
         description=description,
         location=location,
+        uid=uid,
     )
 
 
