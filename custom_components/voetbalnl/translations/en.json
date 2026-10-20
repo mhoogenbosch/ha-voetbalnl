@@ -65,6 +65,9 @@
       },
       "last_result": {
         "name": "Last result"
+      },
+      "competition": {
+        "name": "Competition"
       }
     },
     "calendar": {

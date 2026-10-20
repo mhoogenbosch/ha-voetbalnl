@@ -6,6 +6,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
     ConfigEntryError,
@@ -35,6 +36,8 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.CALENDAR, Platform.SENSOR]
 
+STORAGE_VERSION = 1
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a Voetbal.nl config entry."""
@@ -59,7 +62,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not team_url:
         raise ConfigEntryError(f"Not a voetbal.nl team URL: {raw_url}")
 
-    api = VoetbalNLApi()
+    # Kick-off times of played matches are only known from the schedule, so
+    # they are kept across restarts (see VoetbalNLApi.match_cache)
+    store: Store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}")
+    stored = await store.async_load() or {}
+    api = VoetbalNLApi(match_cache=dict(stored.get("matches") or {}))
 
     try:
         await api.login(username, password)
@@ -80,6 +87,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         team_name=team_name,
         team_url=team_url,
         scan_interval=int(scan_interval),
+        store=store,
     )
 
     # Do an initial data fetch; raises ConfigEntryNotReady on failure. Close
@@ -114,6 +122,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await api.close()
 
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Delete the stored match cache when the entry is removed."""
+    await Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}").async_remove()
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:

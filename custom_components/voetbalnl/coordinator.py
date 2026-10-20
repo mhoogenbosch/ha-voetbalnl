@@ -7,6 +7,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import (
@@ -29,6 +30,7 @@ class VoetbalNLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         team_name: str,
         team_url: str,
         scan_interval: int = DEFAULT_SCAN_INTERVAL,
+        store: Store | None = None,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
@@ -40,6 +42,8 @@ class VoetbalNLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.api = api
         self.team_name = team_name
         self.team_url = team_url
+        # Persists the API's match cache (kick-off times of played matches)
+        self._store = store
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch updated data from voetbal.nl for the configured team."""
@@ -62,6 +66,12 @@ class VoetbalNLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise UpdateFailed(
                 f"Unexpected error fetching team data: {err}"
             ) from err
+
+        if self._store and self.api.match_cache_changed:
+            self.api.match_cache_changed = False
+            self._store.async_delay_save(
+                lambda: {"matches": self.api.match_cache}, 10
+            )
 
         _LOGGER.debug(
             "Updated voetbal.nl data for team '%s': standing=%s, next=%s, last=%s",

@@ -53,6 +53,17 @@ _SERVICE_UNAVAILABLE = re.compile(
 )
 
 _TEAM_PATH = re.compile(r"^/team/(T\d+)(?:/[a-z-]*)?/?$")
+_MATCH_ID = re.compile(r"/wedstrijd/(M\d+)")
+# Competition phase links in the team page's "Indeling" menu,
+# e.g. /team/T2070245537/uitslagen/835120 ("0382 Onder 17 … (1e fase)")
+_PHASE_LINK = re.compile(r"/team/T\d+/(?:programma|uitslagen|stand)/(\d+)/?$")
+_PHASE_LABEL = re.compile(r"\b(\d+e\s+fase)\b", re.I)
+
+
+def match_id(match_url: str) -> str:
+    """Return the voetbal.nl match ID ("M79726132") from a match URL, or ""."""
+    found = _MATCH_ID.search(match_url or "")
+    return found.group(1) if found else ""
 
 
 @dataclass
@@ -108,6 +119,8 @@ class MatchData:
     # True/False when voetbal.nl marked this row with the "my-team" class
     # (only available for authenticated sessions); None when unknown.
     my_team_is_home: bool | None = None
+    # Competition phase, e.g. "2e fase"; "" when the page does not say
+    phase: str = ""
 
     @property
     def is_my_team(self) -> bool:
@@ -190,15 +203,26 @@ class VoetbalNLApi:
     # Proactively re-login after this many days to keep the session fresh
     SESSION_REFRESH_DAYS = 6
 
-    def __init__(self) -> None:
-        """Initialize the API client."""
+    def __init__(self, match_cache: dict[str, dict[str, str]] | None = None) -> None:
+        """Initialize the API client.
+
+        *match_cache* maps a match ID to the kick-off ``time`` and
+        ``location`` seen while the match was still scheduled. A results page
+        shows the score instead of the kick-off time, and the detail page of a
+        played match shows neither, so this is the only source for them once
+        a match is played. The caller persists it across restarts.
+        """
         self._session: aiohttp.ClientSession | None = None
         self._authenticated = False
         self._login_time: datetime | None = None
         self._username: str = ""
         self._password: str = ""
-        # Last known venue per match URL, used when a detail page fails to load
-        self._location_cache: dict[str, str] = {}
+        self.match_cache: dict[str, dict[str, str]] = (
+            match_cache if match_cache is not None else {}
+        )
+        self.match_cache_changed = False
+        # Current competition / poule, filled by get_team_data()
+        self.competition: dict[str, Any] = {}
 
     # ------------------------------------------------------------------ #
     # Plumbing                                                             #
@@ -496,6 +520,7 @@ class VoetbalNLApi:
             "next_match": next_match,
             "last_result": last_result,
             "all_matches": all_matches,
+            "competition": self.competition,
             "team_name": resolved_name,
         }
 
@@ -524,38 +549,60 @@ class VoetbalNLApi:
                 effective_name,
             )
 
-        next_match: MatchData | None = None
-        last_result: MatchData | None = None
-        all_matches: list[MatchData] = []
+        # Schedule of the current phase: the next match and the fixtures ahead
+        schedule, phase_links, header = await self._fetch_match_page(
+            f"{base}/programma", "schedule", played=False
+        )
+        found = _PHASE_LABEL.search(header)
+        current_phase = found.group(1) if found else ""
+        competition = self._competition_info(base, header, current_phase, phase_links)
+        for m in schedule:
+            m.phase = m.phase or current_phase
+        next_match = self._pick_match(schedule, effective_name)
 
-        for page, played in (("programma", False), ("uitslagen", True)):
-            label = "results" if played else "schedule"
-            html = await self._get_text(f"{base}/{page}", label)
-            rows, ajax_url = await self._run(self._parse_schedule_page, html, played)
-            # The page only renders the next round; the rest sits behind "Toon
-            # volledig programma", loaded from an ajax endpoint named in the
-            # page. Merge it in so the calendar holds the whole schedule.
-            if ajax_url:
-                extra_html = await self._fetch_schedule_ajax(ajax_url, label)
-                if extra_html:
-                    rows.extend(
-                        await self._run(self._parse_match_html, extra_html, played)
-                    )
-            rows = self._dedupe_matches(rows)
-            picked = self._pick_match(rows, effective_name)
-            if played:
-                last_result = picked
-            else:
-                next_match = picked
-            all_matches.extend(
-                m for m in rows if self._match_involves_team(m, effective_name)
-            )
+        # Results of every phase. The plain results page only covers the
+        # current phase, which is empty right after a phase change (the KNVB
+        # splits the autumn into phases, each with its own poule); earlier
+        # phases have their own page, linked from the "Indeling" menu.
+        results: list[MatchData] = []
+        pages = [(f"{base}/uitslagen/{pid}", label) for pid, label, _ in phase_links]
+        if not pages:
+            pages = [(f"{base}/uitslagen", current_phase)]
+        for url, label in pages:
+            rows, _, _ = await self._fetch_match_page(url, "results", played=True)
+            for m in rows:
+                m.phase = label
+            results.extend(rows)
+        results = self._dedupe_matches(results)
+
+        ours_ahead = [m for m in schedule if self._match_involves_team(m, effective_name)]
+        ours_played = [m for m in results if self._match_involves_team(m, effective_name)]
+
+        # Remember kick-off times (and venues) while matches are scheduled, and
+        # give played matches theirs back
+        for m in ours_ahead:
+            self._remember(m)
+        for m in ours_played:
+            cached = self.match_cache.get(match_id(m.match_url), {})
+            m.time = m.time or cached.get("time", "")
+            m.location = m.location or cached.get("location", "")
+
+        last_result = self._latest(ours_played) or self._pick_match(results, effective_name)
 
         # Enrich next match and last result with the venue from their detail pages
         for match in (next_match, last_result):
             if match and match.match_url and not match.location:
                 match.location = await self.get_match_location(match.match_url)
+                self._remember(match)
 
+        # Forget matches that are no longer on any page
+        seen = {match_id(m.match_url) for m in ours_ahead + ours_played}
+        for key in [k for k in self.match_cache if k not in seen]:
+            del self.match_cache[key]
+            self.match_cache_changed = True
+
+        all_matches = self._dedupe_matches(ours_played + ours_ahead)
+        self.competition = competition
         return standing_data, next_match, last_result, all_matches
 
     @staticmethod
@@ -655,6 +702,94 @@ class VoetbalNLApi:
             data.team_name = data.team_entry.team_name
         return data
 
+    async def _fetch_match_page(
+        self, url: str, label: str, played: bool
+    ) -> tuple[list[MatchData], list[tuple[str, str, str]], str]:
+        """Return (rows, phase links, header) for a match list page.
+
+        The page only renders the next round; the rest sits behind "Toon
+        volledig programma", loaded from an ajax endpoint named in the page.
+        That is merged in so the full list is returned.
+        """
+        html = await self._get_text(url, label)
+        rows, ajax_url, phase_links, header = await self._run(
+            self._parse_schedule_page, html, played
+        )
+        if ajax_url:
+            extra_html = await self._fetch_schedule_ajax(ajax_url, label)
+            if extra_html:
+                rows.extend(await self._run(self._parse_match_html, extra_html, played))
+        return self._dedupe_matches(rows), phase_links, header
+
+    @staticmethod
+    def _competition_info(
+        base: str,
+        header: str,
+        current_phase: str,
+        phase_links: list[tuple[str, str, str]],
+    ) -> dict[str, Any]:
+        """Describe the current competition and poule for the diagnostic sensor.
+
+        The header reads "Onder 17 Zaterdag - 1e klasse (2e fase)"; the menu
+        link of the current phase reads "0383 Onder 17 (2e fase)", where 0383
+        is the poule code. The current phase is the menu link with the same
+        phase as the header, or the first link (the site lists it first).
+        """
+        name, _, klass = header.partition(" - ")
+        # "1e klasse (2e fase) 11 NAJAAR": poule number and period trail the class
+        tail = re.match(r"^(.*?)\s+(\d+)\s+([A-Za-z]+)$", klass)
+        poule_number, period = ("", "")
+        if tail:
+            klass, poule_number, period = tail.group(1), tail.group(2), tail.group(3).lower()
+        current = next(
+            (link for link in phase_links if current_phase and link[1] == current_phase),
+            phase_links[0] if phase_links else None,
+        )
+        code = re.match(r"(\d+)\s", current[2]) if current else None
+        return {
+            "class": klass or header,
+            "competition": name if klass else "",
+            "phase": current_phase,
+            "poule_code": code.group(1) if code else "",
+            "poule_number": poule_number,
+            "period": period,
+            "poule_id": current[0] if current else "",
+            "poule_name": current[2] if current else "",
+            "standing_url": f"{base}/stand/{current[0]}" if current else f"{base}/stand",
+            "phases": [
+                {"poule_id": pid, "phase": label, "name": text}
+                for pid, label, text in phase_links
+            ],
+        }
+
+    def _remember(self, match: MatchData) -> None:
+        """Store the kick-off time and venue of *match* in the match cache."""
+        key = match_id(match.match_url)
+        if not key:
+            return
+        entry = self.match_cache.setdefault(key, {})
+        for field_name in ("time", "location"):
+            value = getattr(match, field_name)
+            if value and entry.get(field_name) != value:
+                entry[field_name] = value
+                self.match_cache_changed = True
+
+    @classmethod
+    def _latest(cls, matches: list[MatchData]) -> MatchData | None:
+        """Return the most recently played match (pages list newest first)."""
+        best: MatchData | None = None
+        best_key: datetime | None = None
+        for m in matches:
+            parsed = cls._parse_match_datetime(m.date, m.time)
+            if parsed is None:
+                continue
+            key = parsed if isinstance(parsed, datetime) else datetime.combine(
+                parsed, datetime.min.time()
+            )
+            if best_key is None or key > best_key:
+                best, best_key = m, key
+        return best or (matches[0] if matches else None)
+
     async def _fetch_schedule_ajax(self, url: str, label: str) -> str:
         """Return the extra schedule HTML behind "Toon volledig programma".
 
@@ -684,8 +819,13 @@ class VoetbalNLApi:
     @classmethod
     def _parse_schedule_page(
         cls, html: str, played: bool
-    ) -> tuple[list[MatchData], str | None]:
-        """Return the match rows on a schedule/results page and its ajax URL.
+    ) -> tuple[list[MatchData], str | None, list[tuple[str, str, str]], str]:
+        """Return rows, ajax URL, phase links and header of a schedule/results page.
+
+        Phase links are ``(poule ID, phase, link text)`` from the "Indeling"
+        menu, e.g. ``("835120", "1e fase", "0382 Onder 17 Zwaluwen Jeugd (1e
+        fase)")``; the header is the page's competition line, e.g. "Onder 17
+        Zaterdag - 1e klasse (2e fase)".
 
         The ajax URL sits in the ``ScheduleResults`` component, e.g.
         ``data-options='{"url": "/team/ajax/T2070245537/programma/competitie-najaar"}'``.
@@ -707,7 +847,20 @@ class VoetbalNLApi:
                 ajax_url = absolute_voetbalnl_url(url)
                 if not ajax_url:
                     _LOGGER.warning("Ignoring off-site schedule URL: %s", url)
-        return rows, ajax_url
+
+        phase_links: list[tuple[str, str, str]] = []
+        for a in soup.find_all("a", href=True):
+            found = _PHASE_LINK.search(a["href"])
+            if found and found.group(1) not in {link[0] for link in phase_links}:
+                text = " ".join(a.get_text(" ", strip=True).split())
+                if text.count("(") > text.count(")"):
+                    text += ")"  # the menu truncates some names
+                label = _PHASE_LABEL.search(text)
+                phase_links.append((found.group(1), label.group(1) if label else "", text))
+
+        header = soup.select_one(".PageCover-titleWrap h3")
+        header_text = " ".join(header.get_text(" ", strip=True).split()) if header else ""
+        return rows, ajax_url, phase_links, header_text
 
     @classmethod
     def _parse_match_html(cls, html: str, played: bool) -> list[MatchData]:
@@ -716,15 +869,16 @@ class VoetbalNLApi:
 
     @staticmethod
     def _dedupe_matches(matches: list[MatchData]) -> list[MatchData]:
-        """Drop duplicates while preserving order (page rows + ajax rows overlap)."""
+        """Drop duplicates while preserving order (page rows + ajax rows overlap).
+
+        Keyed on the match ID: the same match links to ``…/programma`` while
+        scheduled and to ``…/uitslag`` once played.
+        """
         seen: set[tuple] = set()
         unique: list[MatchData] = []
         for m in matches:
-            key = (
-                (m.match_url,)
-                if m.match_url
-                else (m.date, m.time, m.home_team, m.away_team)
-            )
+            mid = match_id(m.match_url)
+            key = (mid,) if mid else (m.date, m.time, m.home_team, m.away_team)
             if key in seen:
                 continue
             seen.add(key)
@@ -918,6 +1072,7 @@ class VoetbalNLApi:
         """
         if not match_url:
             return ""
+        cached = self.match_cache.get(match_id(match_url), {}).get("location", "")
         session = await self._get_session()
         try:
             async with session.get(match_url) as resp:
@@ -926,18 +1081,17 @@ class VoetbalNLApi:
                         "Match detail page returned HTTP %s for %s",
                         resp.status, match_url,
                     )
-                    return self._location_cache.get(match_url, "")
+                    return cached
                 html = await resp.text()
         except _NETWORK_ERRORS as err:
             _LOGGER.debug("Error fetching match detail for location: %r", err)
-            return self._location_cache.get(match_url, "")
+            return cached
 
         location = await self._run(self._parse_location, html)
-        if location:
-            self._location_cache[match_url] = location
-        else:
+        if not location:
+            # The detail page of a played match has no venue block
             _LOGGER.debug("No LocationDetails found on match page: %s", match_url)
-        return location
+        return location or cached
 
     @staticmethod
     def _parse_location(html: str) -> str:
