@@ -1,12 +1,21 @@
-"""Voetbal.nl API client - handles authentication and data scraping."""
+"""Voetbal.nl API client - handles authentication and data scraping.
+
+Network I/O runs on the event loop; every BeautifulSoup parse runs in the
+executor, because a voetbal.nl page is large enough for html.parser to hold
+the loop for tens of milliseconds per page.
+"""
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, TypeVar
+from urllib.parse import urlsplit
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -15,14 +24,35 @@ from .const import (
     BASE_URL,
     DEFAULT_TIMEOUT,
     HEADERS,
-    KNVB_MODAL_URL,
-    KNVB_OAUTH_HOST,
-    KNVB_OAUTH_LOGIN_URL,
     LOGIN_URL,
     PROFILE_URL,
+    VOETBALNL_HOSTS,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+# Network failures: aiohttp's total timeout raises a bare TimeoutError, which
+# is not an aiohttp.ClientError.
+_NETWORK_ERRORS = (aiohttp.ClientError, TimeoutError)
+
+# Error text voetbal.nl shows when the credentials are wrong. Only this turns
+# a failed login into an auth error (= reauth in HA); anything else (an
+# outage such as "Inloggen is momenteel niet mogelijk", a missing message) is
+# treated as a connection problem that HA retries by itself.
+_CREDENTIALS_ERROR = re.compile(
+    r"wachtwoord|password|gebruikersnaam|username|e-?mail|onbekend|ongeldig"
+    r"|onjuist|incorrect|unrecognized|invalid",
+    re.I,
+)
+_SERVICE_UNAVAILABLE = re.compile(
+    r"momenteel niet|probeer het later|niet mogelijk|storing|onderhoud"
+    r"|temporarily|try again later",
+    re.I,
+)
+
+_TEAM_PATH = re.compile(r"^/team/(T\d+)(?:/[a-z-]*)?/?$")
 
 
 @dataclass
@@ -31,7 +61,6 @@ class TeamInfo:
 
     name: str
     url: str
-    club: str = ""
     team_id: str = ""
 
 
@@ -85,55 +114,74 @@ class MatchData:
         """Return True if voetbal.nl marked this match as involving my team."""
         return self.my_team_is_home is not None
 
-    @property
-    def score_display(self) -> str:
-        """Return score as display string."""
-        if self.home_score is not None and self.away_score is not None:
-            return f"{self.home_score}-{self.away_score}"
-        return f"{self.time}" if self.time else "TBD"
-
     def result_for_team(self, team_name: str) -> str:
-        """Return result string for a specific team."""
+        """Return "win", "loss", "draw" or "unknown" for our team."""
         if self.home_score is None or self.away_score is None:
             return "unknown"
-        # Prefer the authoritative "my-team" marker from voetbal.nl
         if self.my_team_is_home is not None:
-            if self.my_team_is_home:
-                if self.home_score > self.away_score:
-                    return "win"
-                if self.home_score < self.away_score:
-                    return "loss"
-                return "draw"
-            if self.away_score > self.home_score:
-                return "win"
-            if self.away_score < self.home_score:
-                return "loss"
-            return "draw"
-        normalized = team_name.lower().strip()
-        home_normalized = self.home_team.lower().strip()
-        if normalized in home_normalized or home_normalized in normalized:
-            if self.home_score > self.away_score:
-                return "win"
-            if self.home_score < self.away_score:
-                return "loss"
-            return "draw"
-        if self.away_score > self.home_score:
+            # Authoritative "my-team" marker from voetbal.nl
+            we_are_home = self.my_team_is_home
+        else:
+            normalized = team_name.lower().strip()
+            home_normalized = self.home_team.lower().strip()
+            we_are_home = normalized in home_normalized or home_normalized in normalized
+        ours, theirs = (
+            (self.home_score, self.away_score)
+            if we_are_home
+            else (self.away_score, self.home_score)
+        )
+        if ours > theirs:
             return "win"
-        if self.away_score < self.home_score:
+        if ours < theirs:
             return "loss"
         return "draw"
 
 
 class VoetbalNLAuthError(Exception):
-    """Raised when authentication fails."""
+    """Raised when voetbal.nl rejects the credentials."""
 
 
 class VoetbalNLConnectionError(Exception):
-    """Raised when connection to voetbal.nl fails."""
+    """Raised when voetbal.nl cannot be reached or answers unexpectedly."""
 
 
-class VoetbalNLTeamNotFoundError(Exception):
-    """Raised when a team cannot be found."""
+def absolute_voetbalnl_url(href: str) -> str | None:
+    """Return *href* as an absolute https URL on voetbal.nl, or None.
+
+    Relative paths are resolved against voetbal.nl. Absolute URLs are only
+    accepted when they point at voetbal.nl itself, so a URL taken from a page
+    or typed by a user can never send this client (and its session) to
+    another host.
+    """
+    href = (href or "").strip()
+    if not href:
+        return None
+    if href.startswith("/") and not href.startswith("//"):
+        return f"{BASE_URL}{href}"
+    parts = urlsplit(href)
+    if parts.scheme not in ("http", "https") or parts.hostname not in VOETBALNL_HOSTS:
+        return None
+    path = parts.path or "/"
+    query = f"?{parts.query}" if parts.query else ""
+    return f"{BASE_URL}{path}{query}"
+
+
+def normalize_team_url(url: str) -> str | None:
+    """Return the canonical team URL, or None when *url* is not a team page.
+
+    Accepts ``https://www.voetbal.nl/team/T123/overzicht`` and its sub-pages
+    (``/programma``, ``/stand``, ...), with or without ``www.`` or ``https``.
+    """
+    url = (url or "").strip()
+    if url and "://" not in url and not url.startswith("/"):
+        url = f"https://{url}"
+    absolute = absolute_voetbalnl_url(url)
+    if not absolute:
+        return None
+    found = _TEAM_PATH.match(urlsplit(absolute).path)
+    if not found:
+        return None
+    return f"{BASE_URL}/team/{found.group(1)}/overzicht"
 
 
 class VoetbalNLApi:
@@ -149,6 +197,18 @@ class VoetbalNLApi:
         self._login_time: datetime | None = None
         self._username: str = ""
         self._password: str = ""
+        # Last known venue per match URL, used when a detail page fails to load
+        self._location_cache: dict[str, str] = {}
+
+    # ------------------------------------------------------------------ #
+    # Plumbing                                                             #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    async def _run(func: Callable[..., _T], *args: Any) -> _T:
+        """Run a blocking parse function in the executor."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, functools.partial(func, *args))
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create an aiohttp session with cookie support."""
@@ -167,175 +227,66 @@ class VoetbalNLApi:
         """Close the aiohttp session."""
         if self._session and not self._session.closed:
             await self._session.close()
-            self._session = None
+        self._session = None
         self._authenticated = False
         self._login_time = None
 
+    async def _get_text(self, url: str, label: str) -> str:
+        """GET *url* and return the body; raise on anything but HTTP 200."""
+        session = await self._get_session()
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    raise VoetbalNLConnectionError(
+                        f"{label} page returned HTTP {resp.status}"
+                    )
+                return await resp.text()
+        except _NETWORK_ERRORS as err:
+            raise VoetbalNLConnectionError(
+                f"Error fetching {label} page: {err!r}"
+            ) from err
+
+    # ------------------------------------------------------------------ #
+    # Authentication                                                       #
+    # ------------------------------------------------------------------ #
+
     async def login(self, username: str, password: str) -> bool:
-        """
-        Log in to voetbal.nl.
+        """Log in to voetbal.nl with the native Drupal form (email + password).
 
-        Uses the native voetbal.nl Drupal form login (email + password).
-        reCAPTCHA is enforced client-side only and does not block server-side auth.
+        reCAPTCHA is enforced client-side only and does not block server-side
+        auth. voetbal.nl offers no OAuth redirect for third-party clients, so
+        the form is the only path.
 
-        Raises VoetbalNLAuthError on bad credentials.
-        Raises VoetbalNLConnectionError on network failure.
+        Raises VoetbalNLAuthError when voetbal.nl rejects the credentials.
+        Raises VoetbalNLConnectionError on network failure or an outage.
         """
         self._username = username
         self._password = password
-
-        # Use the native Drupal form login (works for all voetbal.nl accounts).
-        # voetbal.nl does not expose a functional OAuth redirect_uri for
-        # third-party clients, so the Drupal form is the only viable path.
-        return await self._login_drupal_form(username, password)
-
-    async def _login_oauth(self, username: str, password: str) -> bool:
-        """
-        Log in using the KNVB Account OAuth flow (login.knvbaccount.nl).
-
-        Flow:
-          1. GET knvb.nl/sportlink_account/modal/login/always_link
-             → parse data-iframe-src for the OAuth URL (fresh nonce + state)
-          2. GET the OAuth URL → receive login form + JSESSIONID cookie
-          3. POST credentials to /oauth/login
-          4. Follow redirects: login.knvbaccount.nl → knvb.nl callback → voetbal.nl
-          5. The voetbal.nl Drupal session cookie is now set
-
-        Raises VoetbalNLAuthError on wrong credentials.
-        Raises VoetbalNLConnectionError / generic Exception on infrastructure errors.
-        """
         session = await self._get_session()
 
-        # -- Step 1: get a fresh OAuth URL from the KNVB modal endpoint ----------
+        # Step 1 – load the login page to get the CSRF form tokens
         try:
-            async with session.get(KNVB_MODAL_URL, allow_redirects=True) as resp:
-                modal_html = await resp.text()
-        except aiohttp.ClientError as err:
-            raise VoetbalNLConnectionError(
-                f"Cannot reach KNVB modal endpoint: {err}"
-            ) from err
-
-        match = re.search(r'data-iframe-src="([^"]+)"', modal_html)
-        if not match:
-            raise VoetbalNLConnectionError(
-                "Could not find OAuth URL in KNVB modal response"
-            )
-        oauth_url = match.group(1).replace("&amp;", "&")
-        _LOGGER.debug("OAuth URL: %s", oauth_url)
-
-        # -- Step 2: load the OAuth login page (sets JSESSIONID cookie) ----------
-        try:
-            async with session.get(oauth_url, allow_redirects=True) as resp:
-                if resp.status != 200:
-                    raise VoetbalNLConnectionError(
-                        f"OAuth login page returned HTTP {resp.status}"
-                    )
-                login_page_html = await resp.text()
-        except aiohttp.ClientError as err:
-            raise VoetbalNLConnectionError(
-                f"Cannot reach login.knvbaccount.nl: {err}"
-            ) from err
-
-        # Verify the login form is present
-        if 'id="form-login"' not in login_page_html and "form-login" not in login_page_html:
-            raise VoetbalNLConnectionError(
-                "Expected login form not found at login.knvbaccount.nl"
-            )
-
-        # -- Step 3: POST credentials to /oauth/login ----------------------------
-        post_data = {"username": username, "password": password}
-        try:
-            async with session.post(
-                KNVB_OAUTH_LOGIN_URL,
-                data=post_data,
-                allow_redirects=True,
-            ) as resp:
-                final_url = str(resp.url)
-                resp_text = await resp.text()
-        except aiohttp.ClientError as err:
-            raise VoetbalNLConnectionError(
-                f"Network error during OAuth credential POST: {err}"
-            ) from err
-
-        # Check for authentication failure (wrong credentials)
-        # login.knvbaccount.nl returns to the login page with an error on failure
-        if KNVB_OAUTH_HOST in final_url:
-            # Still on the OAuth server — credentials were rejected
-            raise VoetbalNLAuthError(
-                "Invalid username or password (KNVB Account)."
-            )
-
-        # -- Step 4: verify we landed on voetbal.nl with a valid session ----------
-        if not await self._is_authenticated(session):
-            _LOGGER.debug(
-                "OAuth flow completed but voetbal.nl session not established "
-                "(final URL: %s)", final_url
-            )
-            raise VoetbalNLConnectionError(
-                "OAuth login completed but voetbal.nl session was not set."
-            )
-
-        self._authenticated = True
-        self._login_time = datetime.now()
-        _LOGGER.debug("Successfully logged in via KNVB Account OAuth as %s", username)
-        return True
-
-    async def _login_drupal_form(self, username: str, password: str) -> bool:
-        """
-        Log in using the native voetbal.nl Drupal form (legacy/fallback path).
-
-        Only works for accounts that have a voetbal.nl-specific password.
-        Accounts created via the KNVB Account SSO button have no Drupal password
-        and will always fail here — use _login_oauth() for those accounts.
-        """
-        session = await self._get_session()
-
-        try:
-            # Step 1 – load the login page to get CSRF form tokens
             async with session.get(LOGIN_URL, allow_redirects=True) as resp:
                 if resp.status != 200:
                     raise VoetbalNLConnectionError(
                         f"Login page returned HTTP {resp.status}"
                     )
                 html = await resp.text()
-        except aiohttp.ClientError as err:
+        except _NETWORK_ERRORS as err:
             raise VoetbalNLConnectionError(
-                f"Cannot reach voetbal.nl login page: {err}"
+                f"Cannot reach voetbal.nl login page: {err!r}"
             ) from err
 
-        soup = BeautifulSoup(html, "html.parser")
-
-        # Find the login form (id="login-form" or contains email + password fields)
-        form = (
-            soup.find("form", id="login-form")
-            or soup.find("form", {"action": re.compile(r"inloggen", re.I)})
-        )
-        if not form:
+        form = await self._run(self._parse_login_form, html)
+        if form is None:
             raise VoetbalNLConnectionError(
                 "Could not locate the login form on voetbal.nl"
             )
-
-        # Collect all hidden fields (form_build_id, form_id, …)
-        form_data: dict[str, str] = {}
-        for inp in form.find_all("input", type="hidden"):
-            name = inp.get("name")
-            if name:
-                form_data[name] = inp.get("value", "")
-
-        # Credentials — field names confirmed from page source
+        action, form_data = form
         form_data["email"] = username
         form_data["password"] = password
-        # Submit button value (Drupal expects the op field)
-        submit_btn = form.find("button", attrs={"name": "op"}) or form.find(
-            "input", attrs={"name": "op"}
-        )
-        if submit_btn:
-            form_data["op"] = submit_btn.get("value", "Inloggen")
 
-        action = form.get("action", "/inloggen")
-        if not action.startswith("http"):
-            action = f"{BASE_URL}{action}"
-
+        # Step 2 – submit the credentials
         try:
             async with session.post(
                 action, data=form_data, allow_redirects=True
@@ -345,32 +296,68 @@ class VoetbalNLApi:
                         f"Login POST returned HTTP {resp.status}"
                     )
                 html_after = await resp.text()
-        except aiohttp.ClientError as err:
+        except _NETWORK_ERRORS as err:
             raise VoetbalNLConnectionError(
-                f"Network error during login POST: {err}"
+                f"Network error during login POST: {err!r}"
             ) from err
 
+        # Step 3 – verify, and tell wrong credentials apart from an outage
         if not await self._is_authenticated(session):
-            # Detect the specific error message voetbal.nl shows
-            err_soup = BeautifulSoup(html_after, "html.parser")
-            error_el = err_soup.find(
-                class_=re.compile(r"messages?.*error|alert.*error|form.*error", re.I)
-            )
-            detail = error_el.get_text(strip=True) if error_el else ""
-            raise VoetbalNLAuthError(
-                f"Invalid username or password for voetbal.nl. {detail}".strip()
+            message = await self._run(self._parse_login_error, html_after)
+            if message and _CREDENTIALS_ERROR.search(message) and not (
+                _SERVICE_UNAVAILABLE.search(message)
+            ):
+                raise VoetbalNLAuthError(
+                    f"voetbal.nl rejected the credentials: {message}"
+                )
+            raise VoetbalNLConnectionError(
+                "Login did not result in a session"
+                + (f": {message}" if message else " (no error message shown)")
             )
 
         self._authenticated = True
         self._login_time = datetime.now()
-        _LOGGER.debug(
-            "Successfully logged in to voetbal.nl as %s", username
-        )
+        _LOGGER.debug("Successfully logged in to voetbal.nl")
         return True
 
+    @staticmethod
+    def _parse_login_form(html: str) -> tuple[str, dict[str, str]] | None:
+        """Return (action URL, hidden fields + op) of the login form."""
+        soup = BeautifulSoup(html, "html.parser")
+        form = soup.find("form", id="login-form") or soup.find(
+            "form", {"action": re.compile(r"inloggen", re.I)}
+        )
+        if not form:
+            return None
+
+        # Hidden fields (form_build_id, form_id, …)
+        form_data: dict[str, str] = {}
+        for inp in form.find_all("input", type="hidden"):
+            name = inp.get("name")
+            if name:
+                form_data[name] = inp.get("value", "")
+
+        # Submit button value (Drupal expects the op field)
+        submit_btn = form.find("button", attrs={"name": "op"}) or form.find(
+            "input", attrs={"name": "op"}
+        )
+        if submit_btn:
+            form_data["op"] = submit_btn.get("value", "Inloggen")
+
+        action = absolute_voetbalnl_url(form.get("action") or "/inloggen")
+        return (action or LOGIN_URL), form_data
+
+    @staticmethod
+    def _parse_login_error(html: str) -> str:
+        """Return the error message voetbal.nl shows after a failed login."""
+        soup = BeautifulSoup(html, "html.parser")
+        error_el = soup.find(
+            class_=re.compile(r"messages?.*error|alert.*error|form.*error", re.I)
+        )
+        return error_el.get_text(" ", strip=True)[:300] if error_el else ""
+
     async def ensure_authenticated(self) -> None:
-        """
-        Ensure the session is still valid; re-login automatically if needed.
+        """Ensure the session is still valid; re-login automatically if needed.
 
         Called before every data fetch. Re-authenticates when:
         - The session has never been authenticated
@@ -378,9 +365,7 @@ class VoetbalNLApi:
         - The session cookie has expired (verified by a profile page check)
         """
         if not self._username:
-            raise VoetbalNLAuthError(
-                "No credentials stored — call login() first."
-            )
+            raise VoetbalNLAuthError("No credentials stored — call login() first.")
 
         # Proactive refresh: re-login shortly before the Drupal session expires
         if self._login_time is not None:
@@ -392,50 +377,60 @@ class VoetbalNLApi:
                 await self.login(self._username, self._password)
                 return
 
-        # Reactive check: verify the cookie still works
         if not self._authenticated or not self._session:
             await self.login(self._username, self._password)
             return
 
+        # Reactive check: verify the cookie still works
         session = await self._get_session()
         if not await self._is_authenticated(session):
             _LOGGER.debug("Session cookie expired — re-logging in")
             await self.login(self._username, self._password)
 
     async def _is_authenticated(self, session: aiohttp.ClientSession) -> bool:
-        """Return True if the current session has authenticated access.
+        """Return True if the session is logged in, False if it is not.
 
-        Note: voetbal.nl returns HTTP 404 for /mijnprofiel even when the user is
-        logged in (the page simply doesn't exist for all accounts). A redirect to
-        /inloggen means the session is NOT authenticated. We therefore skip the
-        status check and look for a logout link or the logged-in body class.
+        A redirect to /inloggen means not logged in. A network error or an
+        unexpected HTTP status says nothing about the session, so it raises
+        VoetbalNLConnectionError instead of reporting "not logged in" (which
+        would end up as a bogus reauth request).
         """
         try:
             async with session.get(PROFILE_URL, allow_redirects=True) as resp:
-                # A redirect to /inloggen means not authenticated
                 if "inloggen" in str(resp.url):
                     return False
+                if resp.status != 200:
+                    raise VoetbalNLConnectionError(
+                        f"Profile page returned HTTP {resp.status}"
+                    )
                 html = await resp.text()
-                soup = BeautifulSoup(html, "html.parser")
-                body = soup.find("body")
-                if body and "logged-in" in body.get("class", []):
-                    return True
-                # voetbal.nl shows a logout link for authenticated sessions
-                if soup.find("a", href=re.compile(r"uitloggen|logout", re.I)):
-                    return True
-                return False
-        except aiohttp.ClientError:
-            return False
+        except _NETWORK_ERRORS as err:
+            raise VoetbalNLConnectionError(
+                f"Cannot verify the voetbal.nl session: {err!r}"
+            ) from err
+        return await self._run(self._page_is_logged_in, html)
+
+    @staticmethod
+    def _page_is_logged_in(html: str) -> bool:
+        """Return True if *html* is a page rendered for a logged-in user."""
+        soup = BeautifulSoup(html, "html.parser")
+        body = soup.find("body")
+        if body and "logged-in" in (body.get("class") or []):
+            return True
+        # voetbal.nl shows a logout link for authenticated sessions
+        return bool(soup.find("a", href=re.compile(r"uitloggen|logout", re.I)))
+
+    # ------------------------------------------------------------------ #
+    # Team search                                                          #
+    # ------------------------------------------------------------------ #
 
     async def search_team(self, team_name: str) -> list[TeamInfo]:
-        """
-        Search for a team by name using the voetbal.nl JSON search API.
+        """Search for a team by name using the voetbal.nl JSON search API.
 
         Endpoint: GET /zoeken/json?page=voetbal&keywords={term}
         Returns items where href contains /team/ (team pages).
         """
         session = await self._get_session()
-
         try:
             async with session.get(
                 f"{BASE_URL}/zoeken/json",
@@ -445,53 +440,50 @@ class VoetbalNLApi:
                     _LOGGER.warning("Search returned HTTP %s", response.status)
                     return []
                 data = await response.json(content_type=None)
-        except (aiohttp.ClientError, ValueError) as err:
+        except (*_NETWORK_ERRORS, ValueError) as err:
             raise VoetbalNLConnectionError(
-                f"Connection error during team search: {err}"
+                f"Connection error during team search: {err!r}"
             ) from err
 
         return self._parse_team_search_results(data, team_name)
 
-    def _parse_team_search_results(
-        self, data: dict, search_term: str
-    ) -> list[TeamInfo]:
+    @staticmethod
+    def _parse_team_search_results(data: Any, search_term: str) -> list[TeamInfo]:
         """Parse team search results from the JSON search API response."""
         teams: list[TeamInfo] = []
+        if not isinstance(data, dict):
+            return teams
 
-        items = data.get("results", {}).get("items", [])
-        for item in items:
+        for item in data.get("results", {}).get("items", []):
             href = item.get("href", "")
             title = item.get("title", "")
-            item_type = item.get("type", "")
-
-            # Team items link to /team/T{id}/... or have type="team"
-            if not ("/team/" in href or item_type == "team"):
+            if not ("/team/" in href or item.get("type", "") == "team"):
                 continue
-            if not href or not title:
+            team_url = normalize_team_url(href)
+            if not team_url or not title:
                 continue
+            id_match = re.search(r"/team/(T\d+)", team_url)
+            teams.append(
+                TeamInfo(
+                    name=title,
+                    url=team_url,
+                    team_id=id_match.group(1) if id_match else "",
+                )
+            )
 
-            team_url = href if href.startswith("http") else f"{BASE_URL}{href}"
-            id_match = re.search(r"/team/(T\d+)", href)
-            team_id = id_match.group(1) if id_match else ""
-            teams.append(TeamInfo(name=title, url=team_url, team_id=team_id))
-
-        _LOGGER.debug(
-            "Found %d team(s) matching '%s'", len(teams), search_term
-        )
+        _LOGGER.debug("Found %d team(s) matching '%s'", len(teams), search_term)
         return teams
 
-    async def get_team_data(
-        self, team_url: str, team_name: str
-    ) -> dict[str, Any]:
-        """
-        Fetch all data for a team: standings, next match, last result.
+    # ------------------------------------------------------------------ #
+    # Team data                                                            #
+    # ------------------------------------------------------------------ #
 
-        Args:
-            team_url: The base URL of the team page on voetbal.nl.
-            team_name: The team name (used to identify the team in results).
+    async def get_team_data(self, team_url: str, team_name: str) -> dict[str, Any]:
+        """Fetch all data for a team: standings, next match, last result.
 
-        Returns:
-            Dictionary with keys 'standing', 'next_match', 'last_result'.
+        Raises VoetbalNLConnectionError when any page fails to load, so the
+        coordinator keeps the previous data instead of publishing a partial
+        or empty schedule (which a calendar mirror would read as deletions).
         """
         standing, next_match, last_result, all_matches = await self._fetch_team_all(
             team_url, team_name
@@ -510,116 +502,64 @@ class VoetbalNLApi:
     async def _fetch_team_all(
         self, team_url: str, team_name: str
     ) -> tuple[StandingData | None, MatchData | None, MatchData | None, list[MatchData]]:
-        """Fetch standings, schedule, and results concurrently."""
-        session = await self._get_session()
+        """Fetch standings, schedule and results."""
+        canonical = normalize_team_url(team_url)
+        if not canonical:
+            raise VoetbalNLConnectionError(f"Not a voetbal.nl team URL: {team_url}")
+        base = canonical.removesuffix("/overzicht")
+        # Team ID (e.g. "T2070245537"); recognises our own standings row
+        # regardless of how the team is named.
+        team_id = base.rsplit("/", 1)[-1]
 
-        # Build sub-page URLs.
-        # team_url is typically .../team/T{id}/overzicht — strip last path
-        # segment to reach the team's base URL, then append sub-page names.
-        base = team_url.rstrip("/")
-        for _suffix in ("/overzicht", "/programma", "/uitslagen", "/stand"):
-            if base.endswith(_suffix):
-                base = base[: -len(_suffix)]
-                break
-        standing_url = f"{base}/stand"
-        schedule_url = f"{base}/programma"
-        results_url = f"{base}/uitslagen"
+        html = await self._get_text(f"{base}/stand", "standing")
+        standing_data = await self._run(
+            self._parse_standings, html, team_name, team_id
+        )
+        # Match on the canonical voetbal.nl name once the standings know it
+        effective_name = standing_data.team_name or team_name
+        if standing_data.team_name:
+            _LOGGER.debug(
+                "Resolved configured team '%s' to voetbal.nl team '%s'",
+                team_name,
+                effective_name,
+            )
 
-        # Team ID from the URL (e.g. "T2070245537"); used to recognise our own
-        # row in the standings regardless of how the team is named.
-        team_id_match = re.search(r"/team/(T\d+)", team_url)
-        team_id = team_id_match.group(1) if team_id_match else ""
-
-        # Name used for matching; replaced by the canonical voetbal.nl name as
-        # soon as the standings page has been parsed (the standings are fetched
-        # first below).
-        effective_name = team_name
-
-        standing_data: StandingData | None = None
         next_match: MatchData | None = None
         last_result: MatchData | None = None
         all_matches: list[MatchData] = []
 
-        try:
-            # Fetch all three pages
-            for url, label in [
-                (standing_url, "standing"),
-                (schedule_url, "schedule"),
-                (results_url, "results"),
-            ]:
-                try:
-                    async with session.get(url) as response:
-                        if response.status != 200:
-                            _LOGGER.warning(
-                                "Failed to fetch %s page: HTTP %s",
-                                label,
-                                response.status,
-                            )
-                            continue
-                        html = await response.text()
+        for page, played in (("programma", False), ("uitslagen", True)):
+            label = "results" if played else "schedule"
+            html = await self._get_text(f"{base}/{page}", label)
+            rows, ajax_url = await self._run(self._parse_schedule_page, html, played)
+            # The page only renders the next round; the rest sits behind "Toon
+            # volledig programma", loaded from an ajax endpoint named in the
+            # page. Merge it in so the calendar holds the whole schedule.
+            if ajax_url:
+                extra_html = await self._fetch_schedule_ajax(ajax_url, label)
+                if extra_html:
+                    rows.extend(
+                        await self._run(self._parse_match_html, extra_html, played)
+                    )
+            rows = self._dedupe_matches(rows)
+            picked = self._pick_match(rows, effective_name)
+            if played:
+                last_result = picked
+            else:
+                next_match = picked
+            all_matches.extend(
+                m for m in rows if self._match_involves_team(m, effective_name)
+            )
 
-                    if label == "standing":
-                        standing_data = self._parse_standings(
-                            html, team_name, team_id
-                        )
-                        if standing_data and standing_data.team_name:
-                            effective_name = standing_data.team_name
-                            _LOGGER.debug(
-                                "Resolved configured team '%s' to voetbal.nl "
-                                "team '%s'",
-                                team_name,
-                                effective_name,
-                            )
-                    elif label in ("schedule", "results"):
-                        played = label == "results"
-                        rows = self._parse_match_list(
-                            BeautifulSoup(html, "html.parser"), played=played
-                        )
-                        # The page itself only renders the next round; the rest
-                        # sits behind "Toon volledig programma", which loads the
-                        # remaining rounds from an ajax endpoint named in the
-                        # page. Merge those in so the calendar holds the whole
-                        # published schedule instead of a single fixture.
-                        extra_html = await self._fetch_schedule_ajax(
-                            session, html, label
-                        )
-                        if extra_html:
-                            rows.extend(
-                                self._parse_match_list(
-                                    BeautifulSoup(extra_html, "html.parser"),
-                                    played=played,
-                                )
-                            )
-                        rows = self._dedupe_matches(rows)
-                        picked = self._pick_match(rows, effective_name)
-                        if played:
-                            last_result = picked
-                        else:
-                            next_match = picked
-                        all_matches.extend(
-                            m for m in rows
-                            if self._match_involves_team(m, effective_name)
-                        )
-
-                except aiohttp.ClientError as err:
-                    _LOGGER.warning("Error fetching %s: %s", label, err)
-
-        except aiohttp.ClientError as err:
-            raise VoetbalNLConnectionError(
-                f"Connection error fetching team data: {err}"
-            ) from err
-
-        # Enrich next match and last result with location from their detail pages
-        if next_match and next_match.match_url and not next_match.location:
-            next_match.location = await self.get_match_location(next_match.match_url)
-        if last_result and last_result.match_url and not last_result.location:
-            last_result.location = await self.get_match_location(last_result.match_url)
+        # Enrich next match and last result with the venue from their detail pages
+        for match in (next_match, last_result):
+            if match and match.match_url and not match.location:
+                match.location = await self.get_match_location(match.match_url)
 
         return standing_data, next_match, last_result, all_matches
 
-    def _parse_standings(
-        self, html: str, team_name: str, team_id: str = ""
-    ) -> StandingData | None:
+    @staticmethod
+    def _parse_standings(html: str, team_name: str, team_id: str = "") -> StandingData:
         """
         Parse standings from a team's /stand page on voetbal.nl.
 
@@ -666,152 +606,113 @@ class VoetbalNLApi:
             s = s.strip()
             return int(s) if s.lstrip("-").isdigit() else 0
 
+        normalized = team_name.lower().strip()
         entries: list[StandingEntry] = []
+        name_match: StandingEntry | None = None
 
         # Each team is an <a class="row"> linking to /team/...
         for row in soup.select('a.row[href*="/team/"]'):
-            try:
-                # voetbal.nl marks the logged-in user's own team with the
-                # "my-team" class; the row href also carries the team ID.
-                row_href = row.get("href", "")
-                is_own_team = "my-team" in (row.get("class") or []) or bool(
-                    team_id and team_id in row_href
-                )
-                vals = [el.get_text(strip=True) for el in row.select(".value")]
-                # Need at least: position, logo, team, and some stats
-                if len(vals) < 4 or not vals[0].isdigit():
-                    continue
+            # voetbal.nl marks the logged-in user's own team with the
+            # "my-team" class; the row href also carries the team ID.
+            row_href = row.get("href", "")
+            is_own_team = "my-team" in (row.get("class") or []) or bool(
+                team_id and f"/{team_id}/" in f"{row_href}/"
+            )
+            vals = [el.get_text(strip=True) for el in row.select(".value")]
+            # Need at least: position, logo, team, and some stats
+            if len(vals) < 4 or not vals[0].isdigit():
+                continue
 
-                # index: 0=pos, 1=logo(skip), 2=name, 3=G, 4=W, 5=GL, 6=V,
-                #        7=P(points), 8=goals_for, 9=goals_against, 10=PM
-                entry = StandingEntry(
-                    position=int(vals[0]),
-                    team_name=vals[2] if len(vals) > 2 else "",
-                    games_played=_int(vals[3]) if len(vals) > 3 else 0,
-                    won=_int(vals[4]) if len(vals) > 4 else 0,
-                    drawn=_int(vals[5]) if len(vals) > 5 else 0,
-                    lost=_int(vals[6]) if len(vals) > 6 else 0,
-                    points=_int(vals[7]) if len(vals) > 7 else 0,
-                    goals_for=_int(vals[8]) if len(vals) > 8 else 0,
-                    goals_against=_int(vals[9]) if len(vals) > 9 else 0,
-                )
-                entry.goal_difference = entry.goals_for - entry.goals_against
-                entries.append(entry)
+            # index: 0=pos, 1=logo(skip), 2=name, 3=G, 4=W, 5=GL, 6=V,
+            #        7=P(points), 8=goals_for, 9=goals_against, 10=PM
+            def _val(i: int) -> int:
+                return _int(vals[i]) if len(vals) > i else 0
 
-                if is_own_team or (
-                    not data.team_entry
-                    and team_name.lower().strip() in entry.team_name.lower()
-                ):
-                    data.team_entry = entry
-                    data.team_position = entry.position
-                    data.team_name = entry.team_name
-            except (ValueError, IndexError) as err:
-                _LOGGER.debug("Skipping standing row: %s", err)
+            entry = StandingEntry(
+                position=int(vals[0]),
+                team_name=vals[2],
+                games_played=_val(3),
+                won=_val(4),
+                drawn=_val(5),
+                lost=_val(6),
+                points=_val(7),
+                goals_for=_val(8),
+                goals_against=_val(9),
+            )
+            entry.goal_difference = entry.goals_for - entry.goals_against
+            entries.append(entry)
+
+            if is_own_team:
+                data.team_entry = entry
+            elif name_match is None and normalized and normalized in entry.team_name.lower():
+                name_match = entry
 
         data.entries = entries
-
-        if not data.team_entry and entries:
-            normalized = team_name.lower().strip()
-            for entry in entries:
-                if normalized in entry.team_name.lower():
-                    data.team_entry = entry
-                    data.team_position = entry.position
-                    data.team_name = entry.team_name
-                    break
-
+        if data.team_entry is None:
+            data.team_entry = name_match
+        if data.team_entry:
+            data.team_position = data.team_entry.position
+            data.team_name = data.team_entry.team_name
         return data
 
-    @staticmethod
-    def _parse_standing_row(cells: list) -> StandingEntry | None:
-        """Parse a single row from the standings table."""
-        # Extract text from each cell
-        values = [c.get_text(strip=True) for c in cells]
-
-        if len(values) < 4:
-            return None
-
-        # Skip if first cell is not a number (header row protection)
-        if not values[0].isdigit():
-            return None
-
-        entry = StandingEntry(position=int(values[0]), team_name=values[1])
-
-        # Try to parse remaining columns (order may vary)
-        # Common column orders: Pos, Team, G, W, G, V, Dv, Dt, Ds, Ptn
-        # or: Pos, Team, Ptn, G, W, G, V, Dv, Dt, Ds
-        col_count = len(values)
-
-        if col_count >= 10:
-            # Standard format: Pos, Team, G, W, G(elijk), V, +, -, Ds, Ptn
-            try:
-                entry.games_played = int(values[2]) if values[2].lstrip("-").isdigit() else 0
-                entry.won = int(values[3]) if values[3].lstrip("-").isdigit() else 0
-                entry.drawn = int(values[4]) if values[4].lstrip("-").isdigit() else 0
-                entry.lost = int(values[5]) if values[5].lstrip("-").isdigit() else 0
-                entry.goals_for = int(values[6]) if values[6].lstrip("-").isdigit() else 0
-                entry.goals_against = int(values[7]) if values[7].lstrip("-").isdigit() else 0
-                # values[8] might be goal difference
-                entry.points = int(values[-1]) if values[-1].lstrip("-").isdigit() else 0
-                entry.goal_difference = entry.goals_for - entry.goals_against
-            except (ValueError, IndexError):
-                pass
-        elif col_count >= 4:
-            # Minimal: Pos, Team, ?, Points
-            try:
-                entry.points = int(values[-1]) if values[-1].lstrip("-").isdigit() else 0
-            except ValueError:
-                pass
-
-        return entry
-
-    async def _fetch_schedule_ajax(
-        self, session: aiohttp.ClientSession, page_html: str, label: str
-    ) -> str:
+    async def _fetch_schedule_ajax(self, url: str, label: str) -> str:
         """Return the extra schedule HTML behind "Toon volledig programma".
 
-        A schedule or results page renders only the next round; the remaining
-        rounds are loaded by the page's ``ScheduleResults`` component from an
-        ajax endpoint whose URL sits in its ``data-options`` attribute, e.g.
-        ``{"url": "/team/ajax/T2070245537/programma/competitie-najaar"}``. The
-        endpoint answers with ``{"html": "<div class=\\"table-wrapper\\">…"}``.
-
-        Returns an empty string when there is nothing extra to fetch — the URL
-        is legitimately empty before a competition has any published rounds.
+        The endpoint answers with ``{"html": "<div class=\\"table-wrapper\\">…"}``.
+        A failure raises: a schedule without its remaining rounds would drop
+        those matches from the calendar.
         """
-        soup = BeautifulSoup(page_html, "html.parser")
-        el = soup.select_one('[data-component="ScheduleResults"][data-options]')
-        if not el:
-            return ""
-
-        try:
-            options = json.loads(el.get("data-options") or "{}")
-        except ValueError:
-            _LOGGER.debug("Could not parse ScheduleResults data-options (%s)", label)
-            return ""
-
-        url = (options.get("url") or "").strip() if isinstance(options, dict) else ""
-        if not url:
-            return ""
-        if not url.startswith("http"):
-            url = f"{BASE_URL}{url}"
-
+        session = await self._get_session()
         try:
             async with session.get(
                 url, headers={"X-Requested-With": "XMLHttpRequest"}
             ) as resp:
                 if resp.status != 200:
-                    _LOGGER.warning(
-                        "Failed to fetch full %s (ajax): HTTP %s", label, resp.status
+                    raise VoetbalNLConnectionError(
+                        f"Full {label} (ajax) returned HTTP {resp.status}"
                     )
-                    return ""
                 payload = await resp.json(content_type=None)
-        except (aiohttp.ClientError, ValueError) as err:
-            _LOGGER.warning("Error fetching full %s (ajax): %s", label, err)
-            return ""
+        except (*_NETWORK_ERRORS, ValueError) as err:
+            raise VoetbalNLConnectionError(
+                f"Error fetching full {label} (ajax): {err!r}"
+            ) from err
 
         if not isinstance(payload, dict):
-            return ""
+            raise VoetbalNLConnectionError(f"Unexpected full {label} (ajax) payload")
         return payload.get("html") or ""
+
+    @classmethod
+    def _parse_schedule_page(
+        cls, html: str, played: bool
+    ) -> tuple[list[MatchData], str | None]:
+        """Return the match rows on a schedule/results page and its ajax URL.
+
+        The ajax URL sits in the ``ScheduleResults`` component, e.g.
+        ``data-options='{"url": "/team/ajax/T2070245537/programma/competitie-najaar"}'``.
+        It is legitimately empty before a competition has published rounds.
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        rows = cls._parse_match_list(soup, played=played)
+
+        ajax_url: str | None = None
+        el = soup.select_one('[data-component="ScheduleResults"][data-options]')
+        if el:
+            try:
+                options = json.loads(el.get("data-options") or "{}")
+            except ValueError:
+                _LOGGER.warning("Could not parse ScheduleResults data-options")
+                options = {}
+            url = (options.get("url") or "").strip() if isinstance(options, dict) else ""
+            if url:
+                ajax_url = absolute_voetbalnl_url(url)
+                if not ajax_url:
+                    _LOGGER.warning("Ignoring off-site schedule URL: %s", url)
+        return rows, ajax_url
+
+    @classmethod
+    def _parse_match_html(cls, html: str, played: bool) -> list[MatchData]:
+        """Parse match rows from an HTML fragment."""
+        return cls._parse_match_list(BeautifulSoup(html, "html.parser"), played=played)
 
     @staticmethod
     def _dedupe_matches(matches: list[MatchData]) -> list[MatchData]:
@@ -848,60 +749,8 @@ class VoetbalNLApi:
                     return m
         return None
 
-    def _parse_next_match(self, html: str, team_name: str) -> MatchData | None:
-        """
-        Parse the next upcoming match for the tracked team from a programma page.
-
-        The page shows all matches in the competition poule. Filters to the first
-        match where home_team or away_team contains *team_name*. Falls back to
-        the first match in the list if no match for the team is found.
-        """
-        soup = BeautifulSoup(html, "html.parser")
-        matches = self._parse_match_list(soup, played=False)
-
-        if not matches:
-            _LOGGER.debug("No upcoming matches found for %s", team_name)
-            return None
-
-        picked = self._pick_match(matches, team_name)
-        if picked:
-            return picked
-
-        _LOGGER.debug(
-            "No upcoming match found for '%s' — team names in schedule: %s",
-            team_name,
-            [f"{m.home_team} vs {m.away_team}" for m in matches[:5]],
-        )
-        return None
-
-    def _parse_last_result(self, html: str, team_name: str) -> MatchData | None:
-        """
-        Parse the most recent result for the tracked team from a uitslagen page.
-
-        The page shows all results in the competition poule. Filters to the first
-        match (newest) where home_team or away_team contains *team_name*.
-        Falls back to the first match in the list if no team-specific match is found.
-        """
-        soup = BeautifulSoup(html, "html.parser")
-        matches = self._parse_match_list(soup, played=True)
-
-        if not matches:
-            _LOGGER.debug("No results found for %s", team_name)
-            return None
-
-        picked = self._pick_match(matches, team_name)
-        if picked:
-            return picked
-
-        _LOGGER.debug(
-            "No result found for '%s' — team names in results: %s",
-            team_name,
-            [f"{m.home_team} vs {m.away_team}" for m in matches[:5]],
-        )
-        return None
-
     @staticmethod
-    def _match_involves_team(match: "MatchData", team_name: str) -> bool:
+    def _match_involves_team(match: MatchData, team_name: str) -> bool:
         """Return True if this match involves our own team.
 
         Prefers the "my-team" class voetbal.nl adds for the logged-in user;
@@ -945,8 +794,9 @@ class VoetbalNLApi:
         year = int(m.group(3))
         return f"{day:02d}-{month:02d}-{year}"
 
+    @classmethod
     def _parse_match_list(
-        self, soup: BeautifulSoup, played: bool | None = None
+        cls, soup: BeautifulSoup, played: bool | None = None
     ) -> list[MatchData]:
         """
         Parse match rows from a voetbal.nl schedule or results page.
@@ -976,10 +826,10 @@ class VoetbalNLApi:
             for table_div in table_divs:
                 # Extract date from the group header
                 title_el = table_div.select_one("div.header span.title span")
-                current_date = self._parse_dutch_date(title_el.get_text()) if title_el else ""
+                current_date = cls._parse_dutch_date(title_el.get_text()) if title_el else ""
 
                 for row in table_div.select('a.row[href*="wedstrijd"]'):
-                    match = self._parse_match_row_div(row)
+                    match = cls._parse_match_row_div(row)
                     if match:
                         if current_date and not match.date:
                             match.date = current_date
@@ -988,7 +838,7 @@ class VoetbalNLApi:
         else:
             # Fallback: no div.table wrappers — parse all match rows directly
             for row in soup.select('a.row[href*="wedstrijd"]'):
-                match = self._parse_match_row_div(row)
+                match = cls._parse_match_row_div(row)
                 if match and (played is None or match.is_played == played):
                     matches.append(match)
 
@@ -999,9 +849,7 @@ class VoetbalNLApi:
         """Parse a single <a class="row"> match element on voetbal.nl."""
         m = MatchData()
 
-        href = row.get("href", "")
-        if href:
-            m.match_url = href if href.startswith("http") else f"{BASE_URL}{href}"
+        m.match_url = absolute_voetbalnl_url(row.get("href", "")) or ""
 
         home_cell = row.select_one(".value.home")
         if home_cell:
@@ -1031,92 +879,6 @@ class VoetbalNLApi:
                 m.time = txt
 
         return m if (m.home_team or m.away_team) else None
-
-    @staticmethod
-    def _parse_match_row(cells: list) -> MatchData | None:
-        """Parse a single match row from a table."""
-        values = [c.get_text(strip=True) for c in cells]
-
-        if len(values) < 3:
-            return None
-
-        match = MatchData()
-
-        # Try to identify columns by content pattern
-        for i, val in enumerate(values):
-            # Date pattern: dd-mm-yyyy or dd/mm/yyyy
-            if re.match(r"\d{1,2}[-/]\d{1,2}[-/]\d{2,4}", val):
-                match.date = val
-            # Time pattern: HH:MM
-            elif re.match(r"\d{1,2}:\d{2}", val) and not match.time:
-                match.time = val
-            # Score pattern: X-Y
-            elif re.match(r"^\d+\s*-\s*\d+$", val):
-                parts = re.split(r"\s*-\s*", val)
-                try:
-                    match.home_score = int(parts[0])
-                    match.away_score = int(parts[1])
-                    match.is_played = True
-                except (ValueError, IndexError):
-                    pass
-
-        # Home and away teams are typically in adjacent cells
-        # after date/time columns. Heuristic: find the cell before the score/time cell
-        team_cells = [
-            c.get_text(strip=True) for c in cells
-            if not re.match(
-                r"^\d{1,2}[-/]\d{1,2}|^\d{1,2}:\d{2}|^\d+\s*-\s*\d+$",
-                c.get_text(strip=True),
-            )
-            and len(c.get_text(strip=True)) > 1
-        ]
-
-        if len(team_cells) >= 2:
-            match.home_team = team_cells[0]
-            match.away_team = team_cells[1]
-
-        # Competition may appear in later columns
-        if len(team_cells) >= 3:
-            match.competition = team_cells[2]
-        if len(team_cells) >= 4:
-            match.location = team_cells[3]
-
-        return match if (match.home_team or match.away_team) else None
-
-    @staticmethod
-    def _parse_match_item(item) -> MatchData | None:
-        """Parse a match from a non-table HTML element."""
-        match = MatchData()
-
-        # Extract date
-        date_el = item.find(class_=re.compile(r"date|datum", re.I))
-        if date_el:
-            match.date = date_el.get_text(strip=True)
-
-        # Extract time
-        time_el = item.find(class_=re.compile(r"time|tijd", re.I))
-        if time_el:
-            match.time = time_el.get_text(strip=True)
-
-        # Extract teams
-        home_el = item.find(class_=re.compile(r"home|thuis", re.I))
-        away_el = item.find(class_=re.compile(r"away|uit", re.I))
-        if home_el:
-            match.home_team = home_el.get_text(strip=True)
-        if away_el:
-            match.away_team = away_el.get_text(strip=True)
-
-        # Extract score
-        score_el = item.find(class_=re.compile(r"score|uitslag", re.I))
-        if score_el:
-            score_text = score_el.get_text(strip=True)
-            score_match = re.match(r"(\d+)\s*-\s*(\d+)", score_text)
-            if score_match:
-                match.home_score = int(score_match.group(1))
-                match.away_score = int(score_match.group(2))
-                match.is_played = True
-
-        return match if (match.home_team or match.away_team) else None
 
     @staticmethod
     def _parse_match_datetime(
@@ -1149,7 +911,11 @@ class VoetbalNLApi:
         return parsed
 
     async def get_match_location(self, match_url: str) -> str:
-        """Fetch the location/venue of a match from its detail page."""
+        """Return the venue of a match from its detail page.
+
+        Falls back to the last known venue when the page cannot be loaded, so
+        a hiccup does not wipe the location from the calendar event.
+        """
         if not match_url:
             return ""
         session = await self._get_session()
@@ -1160,17 +926,26 @@ class VoetbalNLApi:
                         "Match detail page returned HTTP %s for %s",
                         resp.status, match_url,
                     )
-                    return ""
+                    return self._location_cache.get(match_url, "")
                 html = await resp.text()
-        except aiohttp.ClientError as err:
-            _LOGGER.debug("Error fetching match detail for location: %s", err)
-            return ""
+        except _NETWORK_ERRORS as err:
+            _LOGGER.debug("Error fetching match detail for location: %r", err)
+            return self._location_cache.get(match_url, "")
 
+        location = await self._run(self._parse_location, html)
+        if location:
+            self._location_cache[match_url] = location
+        else:
+            _LOGGER.debug("No LocationDetails found on match page: %s", match_url)
+        return location
+
+    @staticmethod
+    def _parse_location(html: str) -> str:
+        """Return "park, street, city" from a match detail page."""
         soup = BeautifulSoup(html, "html.parser")
 
         park = soup.select_one(".LocationDetails-infoPark")
         if not park:
-            _LOGGER.debug("No LocationDetails found on match page: %s", match_url)
             return ""
 
         parts = [park.get_text(strip=True)]
@@ -1188,20 +963,3 @@ class VoetbalNLApi:
                 parts.append(city_match.group(1).strip())
 
         return ", ".join(parts)
-
-    async def validate_team_url(self, team_url: str) -> bool:
-        """Check if a team URL is accessible and returns a valid page."""
-        session = await self._get_session()
-        try:
-            async with session.get(team_url) as response:
-                if response.status != 200:
-                    return False
-                html = await response.text()
-                soup = BeautifulSoup(html, "html.parser")
-                # Check if it looks like a team page (has some team-related content)
-                return bool(
-                    soup.find(class_=re.compile(r"team|standen|programma", re.I))
-                    or soup.find(string=re.compile(r"standen|programma|uitslagen", re.I))
-                )
-        except aiohttp.ClientError:
-            return False

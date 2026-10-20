@@ -6,9 +6,18 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryError,
+    ConfigEntryNotReady,
+)
 
-from .api import VoetbalNLApi, VoetbalNLAuthError, VoetbalNLConnectionError
+from .api import (
+    VoetbalNLApi,
+    VoetbalNLAuthError,
+    VoetbalNLConnectionError,
+    normalize_team_url,
+)
 from .const import (
     CONF_USERNAME,
     CONF_PASSWORD,
@@ -19,7 +28,6 @@ from .const import (
     DATA_COORDINATOR,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
-    VERSION,
 )
 from .coordinator import VoetbalNLCoordinator
 
@@ -39,14 +47,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "No credentials configured. Please re-add the integration."
         )
     team_name = entry.data[CONF_TEAM_NAME]
-    team_url = entry.data[CONF_TEAM_URL]
     scan_interval = entry.options.get(
         CONF_SCAN_INTERVAL,
         entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
     )
 
-    # Use team_url from options if overridden
-    team_url = entry.options.get(CONF_TEAM_URL, team_url)
+    # The options override the team URL only when filled in: a cleared
+    # options field ("") must fall back to the URL from setup.
+    raw_url = entry.options.get(CONF_TEAM_URL) or entry.data[CONF_TEAM_URL]
+    team_url = normalize_team_url(raw_url)
+    if not team_url:
+        raise ConfigEntryError(f"Not a voetbal.nl team URL: {raw_url}")
 
     api = VoetbalNLApi()
 
@@ -71,8 +82,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         scan_interval=int(scan_interval),
     )
 
-    # Do an initial data fetch; raises ConfigEntryNotReady on failure
-    await coordinator.async_config_entry_first_refresh()
+    # Do an initial data fetch; raises ConfigEntryNotReady on failure. Close
+    # the session on any failure, or every setup retry leaks one.
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except Exception:
+        await api.close()
+        raise
 
     hass.data[DOMAIN][entry.entry_id] = {
         DATA_API: api,

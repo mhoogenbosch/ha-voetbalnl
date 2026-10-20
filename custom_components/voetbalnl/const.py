@@ -1,7 +1,7 @@
 """Constants for the Voetbal.nl integration."""
 
 DOMAIN = "voetbalnl"
-VERSION = "1.2.1-mh.1"
+VERSION = "1.3.0-mh.1"
 
 # Configuration keys
 CONF_USERNAME = "username"
@@ -19,24 +19,16 @@ BASE_URL = "https://www.voetbal.nl"
 LOGIN_URL = f"{BASE_URL}/inloggen"
 SEARCH_URL = f"{BASE_URL}/zoeken"
 PROFILE_URL = f"{BASE_URL}/profiel/overzicht"
+# Shown in the setup texts (hassfest forbids URLs in strings.json)
+EXAMPLE_TEAM_URL = f"{BASE_URL}/team/T…/overzicht"
 
-# KNVB Account OAuth URLs (used for accounts created via SSO)
-# The modal endpoint on knvb.nl returns an iframe URL with a fresh nonce+state
-KNVB_MODAL_URL = "https://www.knvb.nl/sportlink_account/modal/login/always_link"
-KNVB_OAUTH_HOST = "https://login.knvbaccount.nl"
-KNVB_OAUTH_LOGIN_URL = f"{KNVB_OAUTH_HOST}/oauth/login"
+# Hosts this client may talk to; any other URL (from a page or typed in) is refused
+VOETBALNL_HOSTS = frozenset({"www.voetbal.nl", "voetbal.nl"})
 
 # Sensor types
 SENSOR_STANDING = "standing"
 SENSOR_NEXT_MATCH = "next_match"
 SENSOR_LAST_RESULT = "last_result"
-
-# Sensor names
-SENSOR_NAMES = {
-    SENSOR_STANDING: "Standing",
-    SENSOR_NEXT_MATCH: "Next Match",
-    SENSOR_LAST_RESULT: "Last Result",
-}
 
 # Sensor icons
 SENSOR_ICONS = {
@@ -44,6 +36,10 @@ SENSOR_ICONS = {
     SENSOR_NEXT_MATCH: "mdi:calendar-clock",
     SENSOR_LAST_RESULT: "mdi:scoreboard",
 }
+
+# Device info
+DEVICE_MANUFACTURER = "KNVB / voetbal.nl"
+DEVICE_MODEL = "Team (KNVB)"
 
 # Data keys
 DATA_COORDINATOR = "coordinator"
@@ -67,4 +63,5 @@ HEADERS = {
 ERROR_AUTH_FAILED = "auth_failed"
 ERROR_CANNOT_CONNECT = "cannot_connect"
 ERROR_TEAM_NOT_FOUND = "team_not_found"
+ERROR_INVALID_TEAM_URL = "invalid_team_url"
 ERROR_UNKNOWN = "unknown"

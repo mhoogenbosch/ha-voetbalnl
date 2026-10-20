@@ -14,7 +14,7 @@ from .api import (
     VoetbalNLApi,
     VoetbalNLAuthError,
     VoetbalNLConnectionError,
-    VoetbalNLTeamNotFoundError,
+    normalize_team_url,
 )
 from .const import (
     CONF_USERNAME,
@@ -25,7 +25,9 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     ERROR_AUTH_FAILED,
+    EXAMPLE_TEAM_URL,
     ERROR_CANNOT_CONNECT,
+    ERROR_INVALID_TEAM_URL,
     ERROR_TEAM_NOT_FOUND,
     ERROR_UNKNOWN,
 )
@@ -59,25 +61,6 @@ STEP_TEAM_SCHEMA = vol.Schema(
         ),
     }
 )
-
-OPTIONS_SCHEMA = vol.Schema(
-    {
-        vol.Optional(
-            CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL
-        ): selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=5, max=1440, step=5, mode=selector.NumberSelectorMode.BOX
-            )
-        ),
-        vol.Optional(CONF_TEAM_NAME): selector.TextSelector(
-            selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
-        ),
-        vol.Optional(CONF_TEAM_URL): selector.TextSelector(
-            selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
-        ),
-    }
-)
-
 
 class VoetbalNLConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle the config flow for Voetbal.nl."""
@@ -133,10 +116,13 @@ class VoetbalNLConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             team_name = user_input[CONF_TEAM_NAME].strip()
-            team_url = (user_input.get(CONF_TEAM_URL) or "").strip()
+            raw_url = (user_input.get(CONF_TEAM_URL) or "").strip()
+            team_url = normalize_team_url(raw_url) if raw_url else None
+            if raw_url and not team_url:
+                errors["base"] = ERROR_INVALID_TEAM_URL
 
             # If team URL not provided, search by name
-            if not team_url:
+            if not raw_url:
                 try:
                     assert self._api is not None
                     teams = await self._api.search_team(team_name)
@@ -179,12 +165,7 @@ class VoetbalNLConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="team",
             data_schema=STEP_TEAM_SCHEMA,
             errors=errors,
-            description_placeholders={
-                "hint": (
-                    "Enter the team name as it appears on voetbal.nl. "
-                    "You can also paste the direct team URL to skip the search."
-                ),
-            },
+            description_placeholders={"example_url": EXAMPLE_TEAM_URL},
         )
 
     async def async_step_reauth(
@@ -225,9 +206,15 @@ class VoetbalNLConfigFlow(ConfigFlow, domain=DOMAIN):
                 if errors:
                     await api.close()
 
+        # Prefill the e-mail address; only the password usually needs retyping
+        username = (user_input or {}).get(CONF_USERNAME) or (
+            self._get_reauth_entry().data.get(CONF_USERNAME, "")
+        )
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=STEP_AUTH_SCHEMA,
+            data_schema=self.add_suggested_values_to_schema(
+                STEP_AUTH_SCHEMA, {CONF_USERNAME: username}
+            ),
             errors=errors,
         )
 
@@ -245,8 +232,21 @@ class VoetbalNLOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle options step."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_create_entry(data=user_input)
+            raw_url = (user_input.get(CONF_TEAM_URL) or "").strip()
+            if raw_url:
+                team_url = normalize_team_url(raw_url)
+                if team_url:
+                    return self.async_create_entry(
+                        data={**user_input, CONF_TEAM_URL: team_url}
+                    )
+                errors["base"] = ERROR_INVALID_TEAM_URL
+            else:
+                # Empty field = use the URL from setup
+                data = dict(user_input)
+                data.pop(CONF_TEAM_URL, None)
+                return self.async_create_entry(data=data)
 
         current = self.config_entry.data
         options = self.config_entry.options
@@ -275,4 +275,9 @@ class VoetbalNLOptionsFlow(OptionsFlow):
             }
         )
 
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"example_url": EXAMPLE_TEAM_URL},
+        )

@@ -57,6 +57,8 @@ class VoetbalNLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"Could not connect to voetbal.nl: {err}"
             ) from err
         except Exception as err:  # noqa: BLE001
+            # A parser bug must not silently empty the calendar either: keep
+            # the previous data, like a connection error does.
             raise UpdateFailed(
                 f"Unexpected error fetching team data: {err}"
             ) from err
