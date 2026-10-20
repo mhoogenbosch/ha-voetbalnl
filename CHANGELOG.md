@@ -5,6 +5,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ---
 
+## [1.4.0-mh.1] - 2026-10-20
+
+### Added
+- **Diagnostic sensor *Competition* (*Competitie*).** State is the class and phase (`1e klasse (2e fase)`); attributes give the competition, phase, poule code and number, period, poule ID and name, a link to the standings, and every phase of the season.
+- `phase` attribute on *Next match* and *Last result*; *Last result* also gets `time` and `match_url`.
+
+### Fixed
+- **Last result and the calendar emptied at a phase change.** The KNVB splits the autumn into phases with a new poule each; the plain results page only covers the current phase, which has no results right after the switch ("Er is geen laatste uitslag bekend"). Results now come from every phase listed in the team's *Indeling* menu, and *Last result* is the most recent of them.
+- **Played matches lost their kick-off time** and became all-day events, because a results page shows the score instead of the time and the detail page of a played match shows neither. A calendar mirror then created a second event next to the timed one. Kick-off time and venue are now remembered while a match is scheduled and kept across restarts (`.storage/voetbalnl.<entry_id>`), so a match stays one timed event that gains its score.
+- Matches are de-duplicated on their match ID: a match links to `…/programma` while scheduled and to `…/uitslag` once played.
+
+---
+
 ## [1.3.0-mh.1] - 2026-10-20
 
 ### Changed

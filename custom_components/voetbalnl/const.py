@@ -1,7 +1,7 @@
 """Constants for the Voetbal.nl integration."""
 
 DOMAIN = "voetbalnl"
-VERSION = "1.3.0-mh.1"
+VERSION = "1.4.0-mh.1"
 
 # Configuration keys
 CONF_USERNAME = "username"
@@ -29,12 +29,14 @@ VOETBALNL_HOSTS = frozenset({"www.voetbal.nl", "voetbal.nl"})
 SENSOR_STANDING = "standing"
 SENSOR_NEXT_MATCH = "next_match"
 SENSOR_LAST_RESULT = "last_result"
+SENSOR_COMPETITION = "competition"
 
 # Sensor icons
 SENSOR_ICONS = {
     SENSOR_STANDING: "mdi:trophy",
     SENSOR_NEXT_MATCH: "mdi:calendar-clock",
     SENSOR_LAST_RESULT: "mdi:scoreboard",
+    SENSOR_COMPETITION: "mdi:tournament",
 }
 
 # Device info

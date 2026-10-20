@@ -10,6 +10,7 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -20,6 +21,7 @@ from .const import (
     DEVICE_MANUFACTURER,
     DEVICE_MODEL,
     DOMAIN,
+    SENSOR_COMPETITION,
     SENSOR_ICONS,
     SENSOR_LAST_RESULT,
     SENSOR_NEXT_MATCH,
@@ -63,6 +65,12 @@ SENSOR_DESCRIPTIONS: tuple[VoetbalNLSensorDescription, ...] = (
         translation_key=SENSOR_LAST_RESULT,
         icon=SENSOR_ICONS[SENSOR_LAST_RESULT],
         native_unit_of_measurement=None,
+    ),
+    VoetbalNLSensorDescription(
+        key=SENSOR_COMPETITION,
+        translation_key=SENSOR_COMPETITION,
+        icon=SENSOR_ICONS[SENSOR_COMPETITION],
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
 )
 
@@ -126,6 +134,8 @@ class VoetbalNLSensor(CoordinatorEntity[VoetbalNLCoordinator], SensorEntity):
             return self._next_match_value(data)
         if key == SENSOR_LAST_RESULT:
             return self._last_result_value(data)
+        if key == SENSOR_COMPETITION:
+            return (data.get("competition") or {}).get("class") or None
         return None
 
     @property
@@ -143,6 +153,10 @@ class VoetbalNLSensor(CoordinatorEntity[VoetbalNLCoordinator], SensorEntity):
             return self._next_match_attributes(data)
         if key == SENSOR_LAST_RESULT:
             return self._last_result_attributes(data)
+        if key == SENSOR_COMPETITION:
+            info = dict(data.get("competition") or {})
+            info.pop("class", None)
+            return info
         return {}
 
     # ------------------------------------------------------------------ #
@@ -263,6 +277,7 @@ class VoetbalNLSensor(CoordinatorEntity[VoetbalNLCoordinator], SensorEntity):
             "competition": getattr(match, "competition", ""),
             "location": getattr(match, "location", ""),
             "match_url": getattr(match, "match_url", ""),
+            "phase": getattr(match, "phase", ""),
             "is_home_game": is_home,
             "opponent": away_team if is_home else home_team,
         }
@@ -308,8 +323,11 @@ class VoetbalNLSensor(CoordinatorEntity[VoetbalNLCoordinator], SensorEntity):
             "home_score": home_score,
             "away_score": away_score,
             "date": getattr(match, "date", ""),
+            "time": getattr(match, "time", ""),
             "competition": getattr(match, "competition", ""),
+            "phase": getattr(match, "phase", ""),
             "location": getattr(match, "location", ""),
+            "match_url": getattr(match, "match_url", ""),
             "is_home_game": is_home,
             "opponent": away_team if is_home else home_team,
         }
