@@ -21,12 +21,21 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api import MatchData, VoetbalNLApi
-from .const import CONF_TEAM_NAME, DATA_COORDINATOR, DOMAIN, VERSION
+from .const import (
+    CONF_TEAM_NAME,
+    DATA_COORDINATOR,
+    DEVICE_MANUFACTURER,
+    DEVICE_MODEL,
+    DOMAIN,
+    VERSION,
+)
 from .coordinator import VoetbalNLCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-# Typical futsal match duration in minutes
+# Time blocked in the calendar per match, in minutes. Covers the longest
+# youth match (O17: 2x40 min plus half-time) with some margin; the site
+# publishes only the kick-off time.
 _MATCH_DURATION_MINUTES = 90
 
 
@@ -109,7 +118,7 @@ def _match_to_event(match: MatchData) -> CalendarEvent | None:
     if match.competition:
         desc_parts.append(match.competition)
     if match.is_played and match.home_score is not None and match.away_score is not None:
-        desc_parts.append(f"Result: {match.home_score}–{match.away_score}")
+        desc_parts.append(f"Uitslag: {match.home_score}–{match.away_score}")
 
     description = "\n".join(desc_parts) if desc_parts else None
     location = match.location if match.location else None
@@ -166,12 +175,12 @@ class VoetbalNLCalendar(CoordinatorEntity[VoetbalNLCoordinator], CalendarEntity)
         super().__init__(coordinator)
         self._team_name = team_name
         self._attr_unique_id = f"{entry_id}_calendar"
-        self._attr_name = "Matches"
+        self._attr_translation_key = "matches"
         self._attr_device_info: dict[str, Any] = {
             "identifiers": {(DOMAIN, entry_id)},
             "name": f"Voetbal.nl – {team_name}",
-            "manufacturer": "Voetbal.nl / KNVB",
-            "model": "Futsal Team Tracker",
+            "manufacturer": DEVICE_MANUFACTURER,
+            "model": DEVICE_MODEL,
             "sw_version": VERSION,
         }
 

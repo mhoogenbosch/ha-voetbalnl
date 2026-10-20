@@ -3,15 +3,15 @@
     "step": {
       "user": {
         "title": "Voetbal.nl – Login",
-        "description": "Enter your voetbal.nl (KNVB Account) email address and password. The integration will log in automatically and refresh the session every 6 days in the background.",
+        "description": "Enter your voetbal.nl (KNVB Account) email address and password. The integration logs in automatically and refreshes the session every 6 days in the background.",
         "data": {
           "username": "Email address",
           "password": "Password"
         }
       },
       "team": {
-        "title": "Voetbal.nl – Select Team",
-        "description": "Enter the name of the futsal team you want to track. Optionally paste the direct team URL from voetbal.nl to skip the search.",
+        "title": "Voetbal.nl – Select team",
+        "description": "Enter the name of the team you want to track. Optionally paste the team URL from voetbal.nl (https://www.voetbal.nl/team/T…/overzicht) to skip the search.",
         "data": {
           "team_name": "Team name",
           "team_url": "Team URL (optional)"
@@ -28,22 +28,48 @@
     },
     "error": {
       "auth_failed": "Invalid email address or password. Please check your voetbal.nl credentials.",
-      "cannot_connect": "Cannot connect to voetbal.nl. Please check your internet connection.",
+      "cannot_connect": "Cannot connect to voetbal.nl. Please check your internet connection, or try again later if voetbal.nl has an outage.",
       "team_not_found": "Team not found. Try providing the direct team URL.",
+      "invalid_team_url": "This is not a voetbal.nl team URL. Use a link like https://www.voetbal.nl/team/T…/overzicht.",
       "unknown": "An unexpected error occurred."
     },
     "abort": {
-      "already_configured": "This team is already configured."
+      "already_configured": "This team is already configured.",
+      "reauth_successful": "Re-authentication was successful."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Voetbal.nl Options",
+        "title": "Voetbal.nl options",
         "data": {
           "scan_interval": "Update interval (minutes)",
           "team_url": "Team URL override"
+        },
+        "data_description": {
+          "team_url": "Leave empty to use the URL from setup."
         }
+      }
+    },
+    "error": {
+      "invalid_team_url": "This is not a voetbal.nl team URL. Use a link like https://www.voetbal.nl/team/T…/overzicht."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "standing": {
+        "name": "Standing"
+      },
+      "next_match": {
+        "name": "Next match"
+      },
+      "last_result": {
+        "name": "Last result"
+      }
+    },
+    "calendar": {
+      "matches": {
+        "name": "Matches"
       }
     }
   }

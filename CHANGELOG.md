@@ -5,6 +5,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ---
 
+## [1.3.0-mh.1] - 2026-10-20
+
+### Changed
+- **Dutch names and texts.** Entity names now come from translations (`translation_key`), so they follow the Home Assistant language: *Stand*, *Volgende wedstrijd*, *Laatste uitslag* and *Wedstrijden* in Dutch. Entity IDs do not change. The match sensor states are Dutch (`Geen wedstrijden gepland`, `Nog geen uitslag`, `… (winst/verlies/gelijk)`, `Home – Away`) and the calendar description says `Uitslag:`. The `result` attribute keeps `win`/`loss`/`draw`/`unknown`.
+- **Device model** is now *Team (KNVB)* (manufacturer *KNVB / voetbal.nl*) instead of *Futsal Team Tracker*; the setup text no longer says futsal either.
+- **HTML parsing runs in the executor** instead of on the event loop. Every refresh parses five to seven pages.
+- The re-authentication form fills in the e-mail address.
+
+### Fixed
+- **A voetbal.nl outage no longer asks you to log in again.** A failed login or session check counted as wrong credentials, whatever the reason: a timeout, an HTTP error or the site's own "Inloggen is momenteel niet mogelijk". Home Assistant then started a re-authentication flow and stopped polling until you logged in again. Now only an explicit credentials error from voetbal.nl does that; everything else is a connection error that is retried automatically.
+- **A partial fetch no longer empties the calendar.** When the standings, schedule, results or "full schedule" (ajax) page failed, the integration logged a warning and published what was left: sensors fell back to "no matches" and a calendar mirror read the missing fixtures as deletions (and re-created them on the next run). Any page failure now keeps the previous data, as Home Assistant does for a failed update.
+- **Timeouts are handled as connection errors.** aiohttp's total timeout raises `TimeoutError`, which is not an `aiohttp.ClientError`, so it slipped past every handler (setup failed instead of retrying).
+- **Clearing the team-URL option broke the entry**: the empty value overrode the URL from setup. An empty option now means "use the setup URL".
+- **No leaked HTTP session** when the first refresh fails during setup.
+- A venue that fails to load keeps its last known value instead of disappearing from the event.
+- The standings matched the team ID as a substring (`T123` also matched `T1234`).
+
+### Security
+- **Team URLs are validated.** Setup and options only accept `https://www.voetbal.nl/team/T…` URLs; URLs read from pages (match links, the ajax endpoint) are only followed when they point at voetbal.nl.
+- **Removed dead code**: the unused KNVB Account OAuth login (which logged its OAuth URL with state and nonce at debug level), several unused parsers, `validate_team_url` and an unused options schema. The e-mail address is no longer written to the debug log.
+
+---
+
 ## [1.2.1-mh.1] - 2026-10-20
 
 ### Added

@@ -17,10 +17,11 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     CONF_TEAM_NAME,
     DATA_COORDINATOR,
+    DEVICE_MANUFACTURER,
+    DEVICE_MODEL,
     DOMAIN,
     SENSOR_ICONS,
     SENSOR_LAST_RESULT,
-    SENSOR_NAMES,
     SENSOR_NEXT_MATCH,
     SENSOR_STANDING,
     VERSION,
@@ -28,6 +29,15 @@ from .const import (
 from .coordinator import VoetbalNLCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+# Shown in the "Last Result" state; the "result" attribute keeps the English
+# key (win/loss/draw/unknown) so automations do not depend on the wording.
+_RESULT_LABELS = {
+    "win": "winst",
+    "loss": "verlies",
+    "draw": "gelijk",
+    "unknown": "onbekend",
+}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -38,19 +48,19 @@ class VoetbalNLSensorDescription(SensorEntityDescription):
 SENSOR_DESCRIPTIONS: tuple[VoetbalNLSensorDescription, ...] = (
     VoetbalNLSensorDescription(
         key=SENSOR_STANDING,
-        name=SENSOR_NAMES[SENSOR_STANDING],
+        translation_key=SENSOR_STANDING,
         icon=SENSOR_ICONS[SENSOR_STANDING],
         native_unit_of_measurement=None,
     ),
     VoetbalNLSensorDescription(
         key=SENSOR_NEXT_MATCH,
-        name=SENSOR_NAMES[SENSOR_NEXT_MATCH],
+        translation_key=SENSOR_NEXT_MATCH,
         icon=SENSOR_ICONS[SENSOR_NEXT_MATCH],
         native_unit_of_measurement=None,
     ),
     VoetbalNLSensorDescription(
         key=SENSOR_LAST_RESULT,
-        name=SENSOR_NAMES[SENSOR_LAST_RESULT],
+        translation_key=SENSOR_LAST_RESULT,
         icon=SENSOR_ICONS[SENSOR_LAST_RESULT],
         native_unit_of_measurement=None,
     ),
@@ -96,8 +106,8 @@ class VoetbalNLSensor(CoordinatorEntity[VoetbalNLCoordinator], SensorEntity):
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry_id)},
             "name": f"Voetbal.nl – {team_name}",
-            "manufacturer": "Voetbal.nl / KNVB",
-            "model": "Futsal Team Tracker",
+            "manufacturer": DEVICE_MANUFACTURER,
+            "model": DEVICE_MODEL,
             "sw_version": VERSION,
         }
 
@@ -227,13 +237,13 @@ class VoetbalNLSensor(CoordinatorEntity[VoetbalNLCoordinator], SensorEntity):
         """Return a human-readable description of the next match."""
         match = data.get(SENSOR_NEXT_MATCH)
         if not match:
-            return "No upcoming matches"
+            return "Geen wedstrijden gepland"
         home = getattr(match, "home_team", "")
         away = getattr(match, "away_team", "")
         date = getattr(match, "date", "")
         time = getattr(match, "time", "")
         date_str = f"{date} {time}".strip()
-        return f"{home} vs {away} ({date_str})" if date_str else f"{home} vs {away}"
+        return f"{home} – {away} ({date_str})" if date_str else f"{home} – {away}"
 
     def _next_match_attributes(self, data: dict[str, Any]) -> dict[str, Any]:
         """Return full next match attributes."""
@@ -265,7 +275,7 @@ class VoetbalNLSensor(CoordinatorEntity[VoetbalNLCoordinator], SensorEntity):
         """Return a human-readable last result string."""
         match = data.get(SENSOR_LAST_RESULT)
         if not match:
-            return "No results yet"
+            return "Nog geen uitslag"
 
         home_score = getattr(match, "home_score", None)
         away_score = getattr(match, "away_score", None)
@@ -274,10 +284,10 @@ class VoetbalNLSensor(CoordinatorEntity[VoetbalNLCoordinator], SensorEntity):
 
         if home_score is not None and away_score is not None:
             result = match.result_for_team(self._resolved_team_name(data))
-            score = f"{home_score}-{away_score}"
-            return f"{home} {score} {away} ({result.upper()})"
+            label = _RESULT_LABELS.get(result, result)
+            return f"{home} {home_score}-{away_score} {away} ({label})"
 
-        return f"{home} vs {away}"
+        return f"{home} – {away}"
 
     def _last_result_attributes(self, data: dict[str, Any]) -> dict[str, Any]:
         """Return full last result attributes."""
