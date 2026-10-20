@@ -11,7 +11,7 @@
       },
       "team": {
         "title": "Voetbal.nl – Select team",
-        "description": "Enter the name of the team you want to track. Optionally paste the team URL from voetbal.nl (https://www.voetbal.nl/team/T…/overzicht) to skip the search.",
+        "description": "Enter the name of the team you want to track. Optionally paste the team URL from voetbal.nl ({example_url}) to skip the search.",
         "data": {
           "team_name": "Team name",
           "team_url": "Team URL (optional)"
@@ -30,7 +30,7 @@
       "auth_failed": "Invalid email address or password. Please check your voetbal.nl credentials.",
       "cannot_connect": "Cannot connect to voetbal.nl. Please check your internet connection, or try again later if voetbal.nl has an outage.",
       "team_not_found": "Team not found. Try providing the direct team URL.",
-      "invalid_team_url": "This is not a voetbal.nl team URL. Use a link like https://www.voetbal.nl/team/T…/overzicht.",
+      "invalid_team_url": "This is not a voetbal.nl team URL. Use a link like {example_url}.",
       "unknown": "An unexpected error occurred."
     },
     "abort": {
@@ -52,7 +52,7 @@
       }
     },
     "error": {
-      "invalid_team_url": "This is not a voetbal.nl team URL. Use a link like https://www.voetbal.nl/team/T…/overzicht."
+      "invalid_team_url": "This is not a voetbal.nl team URL. Use a link like {example_url}."
     }
   },
   "entity": {

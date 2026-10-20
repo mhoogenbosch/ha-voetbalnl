@@ -25,6 +25,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     ERROR_AUTH_FAILED,
+    EXAMPLE_TEAM_URL,
     ERROR_CANNOT_CONNECT,
     ERROR_INVALID_TEAM_URL,
     ERROR_TEAM_NOT_FOUND,
@@ -164,6 +165,7 @@ class VoetbalNLConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="team",
             data_schema=STEP_TEAM_SCHEMA,
             errors=errors,
+            description_placeholders={"example_url": EXAMPLE_TEAM_URL},
         )
 
     async def async_step_reauth(
@@ -273,4 +275,9 @@ class VoetbalNLOptionsFlow(OptionsFlow):
             }
         )
 
-        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"example_url": EXAMPLE_TEAM_URL},
+        )

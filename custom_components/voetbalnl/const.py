@@ -19,6 +19,8 @@ BASE_URL = "https://www.voetbal.nl"
 LOGIN_URL = f"{BASE_URL}/inloggen"
 SEARCH_URL = f"{BASE_URL}/zoeken"
 PROFILE_URL = f"{BASE_URL}/profiel/overzicht"
+# Shown in the setup texts (hassfest forbids URLs in strings.json)
+EXAMPLE_TEAM_URL = f"{BASE_URL}/team/T…/overzicht"
 
 # Hosts this client may talk to; any other URL (from a page or typed in) is refused
 VOETBALNL_HOSTS = frozenset({"www.voetbal.nl", "voetbal.nl"})

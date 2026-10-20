@@ -11,7 +11,7 @@
       },
       "team": {
         "title": "Voetbal.nl – Team selecteren",
-        "description": "Voer de naam in van het team dat je wilt volgen. Je kunt ook de team-URL van voetbal.nl plakken (https://www.voetbal.nl/team/T…/overzicht) om de zoekstap over te slaan.",
+        "description": "Voer de naam in van het team dat je wilt volgen. Je kunt ook de team-URL van voetbal.nl plakken ({example_url}) om de zoekstap over te slaan.",
         "data": {
           "team_name": "Teamnaam",
           "team_url": "Team-URL (optioneel)"
@@ -30,7 +30,7 @@
       "auth_failed": "Ongeldig e-mailadres of wachtwoord. Controleer je voetbal.nl-gegevens.",
       "cannot_connect": "Kan geen verbinding maken met voetbal.nl. Controleer je internetverbinding, of probeer het later opnieuw als voetbal.nl een storing heeft.",
       "team_not_found": "Team niet gevonden. Probeer de directe team-URL op te geven.",
-      "invalid_team_url": "Dit is geen team-URL van voetbal.nl. Gebruik een link als https://www.voetbal.nl/team/T…/overzicht.",
+      "invalid_team_url": "Dit is geen team-URL van voetbal.nl. Gebruik een link als {example_url}.",
       "unknown": "Er is een onverwachte fout opgetreden."
     },
     "abort": {
@@ -52,7 +52,7 @@
       }
     },
     "error": {
-      "invalid_team_url": "Dit is geen team-URL van voetbal.nl. Gebruik een link als https://www.voetbal.nl/team/T…/overzicht."
+      "invalid_team_url": "Dit is geen team-URL van voetbal.nl. Gebruik een link als {example_url}."
     }
   },
   "entity": {
