@@ -5,6 +5,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ---
 
+## [1.2.1-mh.1] - 2026-10-20
+
+### Added
+- **Integration icon.** The integration now ships its own icon in `custom_components/voetbalnl/brand/` (`icon.png`, `icon@2x.png`), taken from the voetbal.nl favicon set. Home Assistant 2026.3+ uses local brand images for custom integrations, so the repairs list, the integrations page and HACS no longer show the "icon not available" placeholder. Older Home Assistant versions keep showing the placeholder; nothing else changes.
+- **CI validation.** A GitHub Actions workflow runs the HACS and hassfest validators on every push and pull request, and weekly.
+
+---
+
 ## [1.2.0-mh.1] - 2026-08-17
 
 ### Changed

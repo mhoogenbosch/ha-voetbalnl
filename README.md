@@ -1,6 +1,6 @@
 # ha-voetbalnl — Voetbal.nl Home Assistant Integration
 
-![Version](https://img.shields.io/badge/version-1.2.0--mh.1-blue) ![HA](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-brightgreen)
+![Version](https://img.shields.io/badge/version-1.2.1--mh.1-blue) ![HA](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-brightgreen)
 
 > **Fork.** This is a fork of [rcAlexterNeuzen/ha-voetbalnl](https://github.com/rcAlexterNeuzen/ha-voetbalnl).
 > It identifies your own team by the `my-team` marker voetbal.nl adds for the logged-in user

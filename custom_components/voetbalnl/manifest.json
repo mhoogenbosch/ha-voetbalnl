@@ -1,7 +1,7 @@
 {
   "domain": "voetbalnl",
   "name": "Voetbal.nl",
-  "version": "1.2.0-mh.1",
+  "version": "1.2.1-mh.1",
   "documentation": "https://github.com/mhoogenbosch/ha-voetbalnl",
   "issue_tracker": "https://github.com/mhoogenbosch/ha-voetbalnl/issues",
   "codeowners": ["@mhoogenbosch"],
