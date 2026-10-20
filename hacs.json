@@ -1,6 +1,5 @@
 {
   "name": "Voetbal.nl",
-  "description": "Track voetbal.nl teams (veld & zaal) — standings, schedule, and results.",
   "render_readme": true,
   "homeassistant": "2024.1.0"
 }

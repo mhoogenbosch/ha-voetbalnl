@@ -1,13 +1,21 @@
 {
   "domain": "voetbalnl",
   "name": "Voetbal.nl",
-  "version": "1.2.1-mh.1",
-  "documentation": "https://github.com/mhoogenbosch/ha-voetbalnl",
-  "issue_tracker": "https://github.com/mhoogenbosch/ha-voetbalnl/issues",
-  "codeowners": ["@mhoogenbosch"],
-  "requirements": ["beautifulsoup4>=4.12.0"],
-  "dependencies": [],
+  "categories": [
+    "productivity_information.calendars_todos",
+    "news_social_media"
+  ],
+  "codeowners": [
+    "@mhoogenbosch"
+  ],
   "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/mhoogenbosch/ha-voetbalnl",
+  "integration_type": "service",
   "iot_class": "cloud_polling",
-  "integration_type": "service"
+  "issue_tracker": "https://github.com/mhoogenbosch/ha-voetbalnl/issues",
+  "requirements": [
+    "beautifulsoup4>=4.12.0"
+  ],
+  "version": "1.2.1-mh.1"
 }
