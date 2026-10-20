@@ -12,7 +12,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 - **CI validation.** A GitHub Actions workflow runs the HACS and hassfest validators on every push and pull request, and weekly.
 
 ### Changed
-- `manifest.json` keys sorted as hassfest requires, and `categories` added (`productivity_information.calendars_todos`, `news_social_media`).
+- `manifest.json` keys sorted as hassfest requires. (`categories` is not added: hassfest still rejects it, HACS only warns about it missing.)
 - Removed the unsupported `description` key from `hacs.json`; the description now lives on the GitHub repository.
 
 ---

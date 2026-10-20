@@ -1,10 +1,6 @@
 {
   "domain": "voetbalnl",
   "name": "Voetbal.nl",
-  "categories": [
-    "productivity_information.calendars_todos",
-    "news_social_media"
-  ],
   "codeowners": [
     "@mhoogenbosch"
   ],
